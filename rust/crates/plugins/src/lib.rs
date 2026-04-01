@@ -2060,6 +2060,10 @@ mod tests {
     }
 
     fn write_tool_plugin(root: &Path, name: &str, version: &str) {
+        write_tool_plugin_with_name(root, name, version, "plugin_echo");
+    }
+
+    fn write_tool_plugin_with_name(root: &Path, name: &str, version: &str, tool_name: &str) {
         let script_path = root.join("tools").join("echo-json.sh");
         write_file(
             &script_path,
@@ -2076,7 +2080,7 @@ mod tests {
         write_file(
             root.join(MANIFEST_RELATIVE_PATH).as_path(),
             format!(
-                "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"tool plugin\",\n  \"tools\": [\n    {{\n      \"name\": \"plugin_echo\",\n      \"description\": \"Echo JSON input\",\n      \"inputSchema\": {{\"type\": \"object\", \"properties\": {{\"message\": {{\"type\": \"string\"}}}}, \"required\": [\"message\"], \"additionalProperties\": false}},\n      \"command\": \"./tools/echo-json.sh\",\n      \"requiredPermission\": \"workspace-write\"\n    }}\n  ]\n}}"
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"tool plugin\",\n  \"tools\": [\n    {{\n      \"name\": \"{tool_name}\",\n      \"description\": \"Echo JSON input\",\n      \"inputSchema\": {{\"type\": \"object\", \"properties\": {{\"message\": {{\"type\": \"string\"}}}}, \"required\": [\"message\"], \"additionalProperties\": false}},\n      \"command\": \"./tools/echo-json.sh\",\n      \"requiredPermission\": \"workspace-write\"\n    }}\n  ]\n}}"
             )
             .as_str(),
         );
@@ -2285,6 +2289,91 @@ mod tests {
     }
 
     #[test]
+    fn load_plugin_from_directory_rejects_invalid_tool_required_permission() {
+        let root = temp_dir("manifest-invalid-tool-permission");
+        write_file(
+            root.join("tools").join("echo.sh").as_path(),
+            "#!/bin/sh\ncat\n",
+        );
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "invalid-tool-permission",
+  "version": "1.0.0",
+  "description": "Invalid tool permission validation",
+  "tools": [
+    {
+      "name": "echo_tool",
+      "description": "Echo tool",
+      "inputSchema": {"type": "object"},
+      "command": "./tools/echo.sh",
+      "requiredPermission": "admin"
+    }
+  ]
+}"#,
+        );
+
+        let error =
+            load_plugin_from_directory(&root).expect_err("invalid tool permission should fail");
+        match error {
+            PluginError::ManifestValidation(errors) => {
+                assert!(errors.iter().any(|error| matches!(
+                    error,
+                    PluginManifestValidationError::InvalidToolRequiredPermission {
+                        tool_name,
+                        permission
+                    } if tool_name == "echo_tool" && permission == "admin"
+                )));
+            }
+            other => panic!("expected manifest validation errors, got {other}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_accumulates_multiple_validation_errors() {
+        let root = temp_dir("manifest-multi-error");
+        write_file(
+            root.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "",
+  "version": "1.0.0",
+  "description": "",
+  "permissions": ["admin"],
+  "commands": [
+    {"name": "", "description": "", "command": "./commands/missing.sh"}
+  ]
+}"#,
+        );
+
+        let error =
+            load_plugin_from_directory(&root).expect_err("multiple manifest errors should fail");
+        match error {
+            PluginError::ManifestValidation(errors) => {
+                assert!(errors.len() >= 4);
+                assert!(errors.iter().any(|error| matches!(
+                    error,
+                    PluginManifestValidationError::EmptyField { field } if *field == "name"
+                )));
+                assert!(errors.iter().any(|error| matches!(
+                    error,
+                    PluginManifestValidationError::EmptyField { field }
+                    if *field == "description"
+                )));
+                assert!(errors.iter().any(|error| matches!(
+                    error,
+                    PluginManifestValidationError::InvalidPermission { permission }
+                    if permission == "admin"
+                )));
+            }
+            other => panic!("expected manifest validation errors, got {other}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn discovers_builtin_and_bundled_plugins() {
         let manager = PluginManager::new(PluginManagerConfig::new(temp_dir("discover")));
         let plugins = manager.list_plugins().expect("plugins should list");
@@ -2376,6 +2465,24 @@ mod tests {
     }
 
     #[test]
+    fn default_bundled_root_loads_repo_bundles_as_installed_plugins() {
+        let config_home = temp_dir("default-bundled-home");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("default bundled plugins should auto-install");
+        assert!(installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "example-bundled@bundled"));
+        assert!(installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "sample-hooks@bundled"));
+
+        let _ = fs::remove_dir_all(config_home);
+    }
+
+    #[test]
     fn persists_bundled_plugin_enable_state_across_reloads() {
         let config_home = temp_dir("bundled-state-home");
         let bundled_root = temp_dir("bundled-state-root");
@@ -2403,6 +2510,39 @@ mod tests {
         assert!(reloaded
             .iter()
             .any(|plugin| { plugin.metadata.id == "starter@bundled" && plugin.enabled }));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn persists_bundled_plugin_disable_state_across_reloads() {
+        let config_home = temp_dir("bundled-disabled-home");
+        let bundled_root = temp_dir("bundled-disabled-root");
+        write_bundled_plugin(&bundled_root.join("starter"), "starter", "0.1.0", true);
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let mut manager = PluginManager::new(config);
+
+        manager
+            .disable("starter@bundled")
+            .expect("disable bundled plugin should succeed");
+        assert_eq!(
+            load_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
+            Some(&false)
+        );
+
+        let mut reloaded_config = PluginManagerConfig::new(&config_home);
+        reloaded_config.bundled_root = Some(bundled_root.clone());
+        reloaded_config.enabled_plugins = load_enabled_plugins(&manager.settings_path());
+        let reloaded_manager = PluginManager::new(reloaded_config);
+        let reloaded = reloaded_manager
+            .list_installed_plugins()
+            .expect("bundled plugins should still be listed");
+        assert!(reloaded
+            .iter()
+            .any(|plugin| { plugin.metadata.id == "starter@bundled" && !plugin.enabled }));
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
@@ -2548,6 +2688,37 @@ mod tests {
         assert!(installed
             .iter()
             .any(|plugin| plugin.metadata.id == "scan-demo@external"));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn list_installed_plugins_scans_packaged_manifests_in_install_root() {
+        let config_home = temp_dir("installed-packaged-scan-home");
+        let bundled_root = temp_dir("installed-packaged-scan-bundled");
+        let install_root = config_home.join("plugins").join("installed");
+        let installed_plugin_root = install_root.join("scan-packaged");
+        write_file(
+            installed_plugin_root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            r#"{
+  "name": "scan-packaged",
+  "version": "1.0.0",
+  "description": "Packaged manifest in install root"
+}"#,
+        );
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        config.install_root = Some(install_root);
+        let manager = PluginManager::new(config);
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("installed plugins should scan packaged manifests");
+        assert!(installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "scan-packaged@external"));
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
