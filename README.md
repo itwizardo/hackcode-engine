@@ -45,6 +45,9 @@ This repository exists to document and improve that loop: direction from the hum
 In other words: **stop staring at the files**. Study the workflow that produced them.
 
 > [!IMPORTANT]
+> **This repository is not affiliated with any coin, token, NFT, or crypto project.** It is software infrastructure work only, and any attempt to frame it as a cryptocurrency project is incorrect.
+
+> [!IMPORTANT]
 > **Rust port is now in progress** on the [`dev/rust`](https://github.com/instructkr/claw-code/tree/dev/rust) branch and is expected to be merged into main today. The Rust implementation aims to deliver a faster, memory-safe harness runtime. Stay tuned — this will be the definitive version of the project.
 
 > If you find this work useful, consider [sponsoring @instructkr on GitHub](https://github.com/sponsors/instructkr) to support continued open-source harness engineering research.
