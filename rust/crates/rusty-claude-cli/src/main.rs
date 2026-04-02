@@ -3953,13 +3953,13 @@ fn print_help() {
 mod tests {
     use super::{
         describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
-        format_init_report, format_internal_prompt_progress_line, format_model_report,
-        format_model_switch_report, format_permissions_report,
+        format_internal_prompt_progress_line, format_model_report, format_model_switch_report,
+        format_permissions_report,
         format_permissions_switch_report, format_resume_report, format_status_report,
         format_tool_call_start, format_tool_result, normalize_permission_mode, parse_args,
         parse_git_status_branch, parse_git_status_metadata, permission_policy, print_help_to,
-        push_output_block, render_config_report, render_diff_report, render_init_claude_md,
-        render_memory_report, render_repl_help, resolve_model_alias, response_to_events,
+        push_output_block, render_config_report, render_diff_report, render_memory_report,
+        render_repl_help, resolve_model_alias, response_to_events,
         resume_supported_slash_commands, run_resume_command, status_context, CliAction,
         CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState, SlashCommand,
         StatusUsage, DEFAULT_MODEL,
