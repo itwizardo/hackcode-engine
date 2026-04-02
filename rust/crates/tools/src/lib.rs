@@ -805,6 +805,34 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        ToolSpec {
+            name: "MCP",
+            description: "Execute a tool provided by a connected MCP server.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" },
+                    "tool": { "type": "string" },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["server", "tool"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TestingPermission",
+            description: "Test-only tool for verifying permission enforcement behavior.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
     ]
 }
 
@@ -854,6 +882,10 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "ReadMcpResource" => from_value::<McpResourceInput>(input).and_then(run_read_mcp_resource),
         "McpAuth" => from_value::<McpAuthInput>(input).and_then(run_mcp_auth),
         "RemoteTrigger" => from_value::<RemoteTriggerInput>(input).and_then(run_remote_trigger),
+        "MCP" => from_value::<McpToolInput>(input).and_then(run_mcp_tool),
+        "TestingPermission" => {
+            from_value::<TestingPermissionInput>(input).and_then(run_testing_permission)
+        }
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -1037,6 +1069,26 @@ fn run_remote_trigger(input: RemoteTriggerInput) -> Result<String, String> {
         "body": input.body,
         "status": "triggered",
         "message": "Remote trigger stub response"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_mcp_tool(input: McpToolInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "server": input.server,
+        "tool": input.tool,
+        "arguments": input.arguments,
+        "result": null,
+        "message": "MCP tool proxy not yet connected"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_testing_permission(input: TestingPermissionInput) -> Result<String, String> {
+    to_pretty_json(json!({
+        "action": input.action,
+        "permitted": true,
+        "message": "Testing permission tool stub"
     }))
 }
 fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> {
@@ -1402,6 +1454,19 @@ struct RemoteTriggerInput {
     headers: Option<Value>,
     #[serde(default)]
     body: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpToolInput {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestingPermissionInput {
+    action: String,
 }
 
 #[derive(Debug, Serialize)]
