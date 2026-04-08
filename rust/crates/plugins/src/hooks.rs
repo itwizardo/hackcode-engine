@@ -561,4 +561,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn output_with_stdin_tolerates_broken_pipe_when_child_closes_stdin_early() {
+        // given: a hook that immediately closes stdin without consuming the
+        // JSON payload. Use an oversized payload so the parent keeps writing
+        // long enough for Linux to surface EPIPE on the old implementation.
+        let root = temp_dir("stdin-close");
+        let script = root.join("close-stdin.sh");
+        fs::create_dir_all(&root).expect("temp hook dir");
+        fs::write(
+            &script,
+            "#!/bin/sh\nexec 0<&-\nprintf 'stdin closed early\\n'\nsleep 0.05\n",
+        )
+        .expect("write stdin-closing hook");
+        make_executable(&script);
+
+        let mut child = super::shell_command(script.to_str().expect("utf8 path"));
+        child.stdin(std::process::Stdio::piped());
+        child.stdout(std::process::Stdio::piped());
+        child.stderr(std::process::Stdio::piped());
+        let large_input = vec![b'x'; 2 * 1024 * 1024];
+
+        // when
+        let output = child
+            .output_with_stdin(&large_input)
+            .expect("broken pipe should be tolerated");
+
+        // then
+        assert!(
+            output.status.success(),
+            "child should still exit cleanly: {output:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "stdin closed early"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }
