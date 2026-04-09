@@ -19,6 +19,7 @@ use super::{preflight_message_request, Provider, ProviderFuture};
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -36,6 +37,7 @@ pub struct OpenAiCompatConfig {
 const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
 const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
 const DASHSCOPE_ENV_VARS: &[&str] = &["DASHSCOPE_API_KEY"];
+const OLLAMA_ENV_VARS: &[&str] = &["OLLAMA_API_KEY"];
 
 impl OpenAiCompatConfig {
     #[must_use]
@@ -72,12 +74,25 @@ impl OpenAiCompatConfig {
         }
     }
 
+    /// Ollama local inference backend. No API key required.
+    /// Speaks the OpenAI-compatible REST shape at /v1.
+    #[must_use]
+    pub const fn ollama() -> Self {
+        Self {
+            provider_name: "Ollama",
+            api_key_env: "OLLAMA_API_KEY",
+            base_url_env: "OLLAMA_BASE_URL",
+            default_base_url: DEFAULT_OLLAMA_BASE_URL,
+        }
+    }
+
     #[must_use]
     pub fn credential_env_vars(self) -> &'static [&'static str] {
         match self.provider_name {
             "xAI" => XAI_ENV_VARS,
             "OpenAI" => OPENAI_ENV_VARS,
             "DashScope" => DASHSCOPE_ENV_VARS,
+            "Ollama" => OLLAMA_ENV_VARS,
             _ => &[],
         }
     }
@@ -123,6 +138,14 @@ impl OpenAiCompatClient {
                 config.credential_env_vars(),
             ));
         };
+        Ok(Self::new(api_key, config))
+    }
+
+    /// Like `from_env` but uses a dummy key when the env var is unset.
+    /// Used for Ollama which does not require API key authentication.
+    pub fn from_env_optional_key(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
+        let api_key = read_env_non_empty(config.api_key_env)?
+            .unwrap_or_else(|| "ollama".to_string());
         Ok(Self::new(api_key, config))
     }
 

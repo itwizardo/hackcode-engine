@@ -33,6 +33,7 @@ pub enum ProviderKind {
     Anthropic,
     Xai,
     OpenAi,
+    Ollama,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +145,7 @@ pub fn resolve_model_alias(model: &str) -> String {
                     "grok-2" => "grok-2",
                     _ => trimmed,
                 },
-                ProviderKind::OpenAi => trimmed,
+                ProviderKind::OpenAi | ProviderKind::Ollama => trimmed,
             })
         })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
@@ -194,6 +195,23 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
         });
     }
+    // Ollama local models — HuggingFace models pulled via `ollama pull hf.co/...`
+    // and any model containing a colon (e.g. "llama3.2:1b", "gemma:7b")
+    if canonical.starts_with("hf.co/")
+        || canonical.contains(':')
+        || canonical.starts_with("llama")
+        || canonical.starts_with("gemma")
+        || canonical.starts_with("mistral")
+        || canonical.starts_with("phi")
+        || canonical.starts_with("codellama")
+    {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::Ollama,
+            auth_env: "OLLAMA_API_KEY",
+            base_url_env: "OLLAMA_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_OLLAMA_BASE_URL,
+        });
+    }
     None
 }
 
@@ -211,7 +229,8 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     if openai_compat::has_api_key("XAI_API_KEY") {
         return ProviderKind::Xai;
     }
-    ProviderKind::Anthropic
+    // Default to Ollama (local inference) — HackCode is local-first
+    ProviderKind::Ollama
 }
 
 #[must_use]
