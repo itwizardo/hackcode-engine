@@ -22,10 +22,10 @@ pub enum BaseCommitSource {
     File(String),
 }
 
-/// Read the `.claw-base` file from the given directory and return the trimmed
+/// Read the `.hackcode-base` file from the given directory and return the trimmed
 /// commit hash, or `None` when the file is absent or empty.
 pub fn read_claw_base_file(cwd: &Path) -> Option<String> {
-    let path = cwd.join(".claw-base");
+    let path = cwd.join(".hackcode-base");
     let content = std::fs::read_to_string(path).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -36,7 +36,7 @@ pub fn read_claw_base_file(cwd: &Path) -> Option<String> {
 }
 
 /// Resolve the expected base commit: prefer the `--base-commit` flag value,
-/// fall back to reading `.claw-base` from `cwd`.
+/// fall back to reading `.hackcode-base` from `cwd`.
 pub fn resolve_expected_base(flag_value: Option<&str>, cwd: &Path) -> Option<BaseCommitSource> {
     if let Some(value) = flag_value {
         let trimmed = value.trim();
@@ -254,7 +254,7 @@ mod tests {
         // given
         let root = temp_dir();
         fs::create_dir_all(&root).expect("create dir");
-        fs::write(root.join(".claw-base"), "abc1234def5678\n").expect("write .claw-base");
+        fs::write(root.join(".hackcode-base"), "abc1234def5678\n").expect("write .hackcode-base");
 
         // when
         let value = read_claw_base_file(&root);
@@ -283,7 +283,7 @@ mod tests {
         // given
         let root = temp_dir();
         fs::create_dir_all(&root).expect("create dir");
-        fs::write(root.join(".claw-base"), "  \n").expect("write empty .claw-base");
+        fs::write(root.join(".hackcode-base"), "  \n").expect("write empty .hackcode-base");
 
         // when
         let value = read_claw_base_file(&root);
@@ -298,7 +298,7 @@ mod tests {
         // given
         let root = temp_dir();
         fs::create_dir_all(&root).expect("create dir");
-        fs::write(root.join(".claw-base"), "from_file\n").expect("write .claw-base");
+        fs::write(root.join(".hackcode-base"), "from_file\n").expect("write .hackcode-base");
 
         // when
         let source = resolve_expected_base(Some("from_flag"), &root);
@@ -316,7 +316,7 @@ mod tests {
         // given
         let root = temp_dir();
         fs::create_dir_all(&root).expect("create dir");
-        fs::write(root.join(".claw-base"), "from_file\n").expect("write .claw-base");
+        fs::write(root.join(".hackcode-base"), "from_file\n").expect("write .hackcode-base");
 
         // when
         let source = resolve_expected_base(None, &root);
@@ -391,7 +391,7 @@ mod tests {
         let root = temp_dir();
         init_repo(&root);
         let sha = head_sha(&root);
-        fs::write(root.join(".claw-base"), format!("{sha}\n")).expect("write .claw-base");
+        fs::write(root.join(".hackcode-base"), format!("{sha}\n")).expect("write .hackcode-base");
         let source = resolve_expected_base(None, &root);
 
         // when
@@ -408,7 +408,7 @@ mod tests {
         let root = temp_dir();
         init_repo(&root);
         let old_sha = head_sha(&root);
-        fs::write(root.join(".claw-base"), format!("{old_sha}\n")).expect("write .claw-base");
+        fs::write(root.join(".hackcode-base"), format!("{old_sha}\n")).expect("write .hackcode-base");
         commit_file(&root, "new.txt", "advance head");
         let new_sha = head_sha(&root);
         let source = resolve_expected_base(None, &root);
