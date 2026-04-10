@@ -19,7 +19,7 @@ use crate::session::{Session, SessionError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStore {
     /// Resolved root of the session namespace, e.g.
-    /// `/home/user/project/.claw/sessions/a1b2c3d4e5f60718/`.
+    /// `/home/user/project/.hackcode/sessions/a1b2c3d4e5f60718/`.
     sessions_root: PathBuf,
     /// The canonical workspace path that was fingerprinted.
     workspace_root: PathBuf,
@@ -28,11 +28,11 @@ pub struct SessionStore {
 impl SessionStore {
     /// Build a store from the server's current working directory.
     ///
-    /// The on-disk layout becomes `<cwd>/.claw/sessions/<workspace_hash>/`.
+    /// The on-disk layout becomes `<cwd>/.hackcode/sessions/<workspace_hash>/`.
     pub fn from_cwd(cwd: impl AsRef<Path>) -> Result<Self, SessionControlError> {
         let cwd = cwd.as_ref();
         let sessions_root = cwd
-            .join(".claw")
+            .join(".hackcode")
             .join("sessions")
             .join(workspace_fingerprint(cwd));
         fs::create_dir_all(&sessions_root)?;
@@ -327,7 +327,7 @@ pub fn sessions_dir() -> Result<PathBuf, SessionControlError> {
 pub fn managed_sessions_dir_for(
     base_dir: impl AsRef<Path>,
 ) -> Result<PathBuf, SessionControlError> {
-    let path = base_dir.as_ref().join(".claw").join("sessions");
+    let path = base_dir.as_ref().join(".hackcode").join("sessions");
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -564,13 +564,13 @@ fn session_id_from_path(path: &Path) -> Option<String> {
 
 fn format_missing_session_reference(reference: &str) -> String {
     format!(
-        "session not found: {reference}\nHint: managed sessions live in .claw/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
+        "session not found: {reference}\nHint: managed sessions live in .hackcode/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
     )
 }
 
 fn format_no_managed_sessions() -> String {
     format!(
-        "no managed sessions found in .claw/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
+        "no managed sessions found in .hackcode/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
     )
 }
 

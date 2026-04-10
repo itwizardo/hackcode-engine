@@ -62,7 +62,7 @@ impl OpenAiCompatConfig {
 
     /// Alibaba DashScope compatible-mode endpoint (Qwen family models).
     /// Uses the OpenAI-compatible REST shape at /compatible-mode/v1.
-    /// Requested via Discord #clawcode-get-help: native Alibaba API for
+    /// Requested via Discord #hackcode-get-help: native Alibaba API for
     /// higher rate limits than going through OpenRouter.
     #[must_use]
     pub const fn dashscope() -> Self {

@@ -1,4 +1,4 @@
-//! Core runtime primitives for the `claw` CLI and supporting crates.
+//! Core runtime primitives for the `hackcode` CLI and supporting crates.
 //!
 //! This crate owns session persistence, permission evaluation, prompt assembly,
 //! MCP plumbing, tool-facing file operations, and the core conversation loop

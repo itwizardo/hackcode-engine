@@ -9,6 +9,8 @@
 mod init;
 mod input;
 mod render;
+mod scanner;
+mod setup;
 
 use std::collections::BTreeSet;
 use std::env;
@@ -56,10 +58,10 @@ use runtime::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tools::{
-    execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
+    execute_tool, hackcode_tool_specs, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Q4_K_M";
+const DEFAULT_MODEL: &str = "hackcode-uncensored";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
@@ -178,6 +180,14 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Apply HackCode config (baseURL → OLLAMA_HOST) if no env override is set
+    if env::var("OLLAMA_HOST").is_err() {
+        if let Some((_model, Some(base_url))) = hackcode_config() {
+            if !base_url.is_empty() {
+                env::set_var("OLLAMA_HOST", &base_url);
+            }
+        }
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
         CliAction::DumpManifests { output_format } => dump_manifests(output_format)?,
@@ -226,6 +236,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             base_commit,
             reasoning_effort,
         } => {
+            ensure_hackcode_ready()?;
             run_stale_base_preflight(base_commit.as_deref());
             // Only consume piped stdin as prompt context when the permission
             // mode is fully unattended. In modes where the permission
@@ -258,15 +269,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
             base_commit,
             reasoning_effort,
-        } => run_repl(
-            model,
-            allowed_tools,
-            permission_mode,
-            base_commit,
-            reasoning_effort,
-        )?,
+        } => {
+            ensure_hackcode_ready()?;
+            run_repl(
+                model,
+                allowed_tools,
+                permission_mode,
+                base_commit,
+                reasoning_effort,
+            )?;
+        }
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
+        CliAction::Setup => setup::run_setup()?,
+        CliAction::Scan => {
+            scanner::run_scanner();
+        }
     }
     Ok(())
 }
@@ -355,6 +373,8 @@ enum CliAction {
         reasoning_effort: Option<String>,
     },
     HelpTopic(LocalHelpTopic),
+    Setup,
+    Scan,
     // prompt-mode formatting is only supported for non-interactive runs
     Help {
         output_format: CliOutputFormat,
@@ -434,6 +454,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "--version" | "-V" => {
                 wants_version = true;
                 index += 1;
+            }
+            "--setup" => {
+                return Ok(CliAction::Setup);
+            }
+            "--scan" | "--tools" => {
+                return Ok(CliAction::Scan);
             }
             "--model" => {
                 let value = args
@@ -1044,6 +1070,75 @@ fn config_model_for_current_dir() -> Option<String> {
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }
 
+/// Ensure Ollama is running and first-run setup has been completed.
+/// Called automatically before REPL or Prompt actions.
+fn ensure_hackcode_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".config").join("hackcode").join("config.json"))
+        .unwrap_or_default();
+
+    // First run — no config yet → run setup wizard
+    if !config_path.exists() {
+        setup::run_setup()?;
+    }
+
+    // Make sure Ollama is running
+    let ollama_up = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().unwrap(),
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok();
+
+    if !ollama_up {
+        eprintln!("\x1b[38;2;0;255;65m[HackCode]\x1b[0m Starting Ollama...");
+        // Try to start ollama serve in the background
+        let extra = format!(
+            "/opt/homebrew/bin:/usr/local/bin:/Applications/Ollama.app/Contents/Resources:{}",
+            env::var("PATH").unwrap_or_default()
+        );
+        let _ = Command::new("/bin/bash")
+            .args(["-c", "ollama serve &>/dev/null &"])
+            .env("PATH", &extra)
+            .spawn();
+
+        // Wait up to 8 seconds for it to come up
+        for i in 0..16 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if std::net::TcpStream::connect_timeout(
+                &"127.0.0.1:11434".parse().unwrap(),
+                std::time::Duration::from_millis(300),
+            )
+            .is_ok()
+            {
+                eprintln!(
+                    "\x1b[38;2;0;255;65m[HackCode]\x1b[0m Ollama started \x1b[38;2;0;255;65m✓\x1b[0m"
+                );
+                break;
+            }
+            if i == 15 {
+                eprintln!(
+                    "\x1b[91m[HackCode]\x1b[0m Could not start Ollama. Please run: ollama serve"
+                );
+                return Err("Ollama is not running".into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Read the HackCode-specific config at ~/.config/hackcode/config.json
+/// and return (model, baseURL) if present.
+fn hackcode_config() -> Option<(Option<String>, Option<String>)> {
+    let home = env::var("HOME").ok()?;
+    let config_path = PathBuf::from(home).join(".config").join("hackcode").join("config.json");
+    let raw = fs::read_to_string(&config_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let model = parsed.get("model").and_then(|v| v.as_str()).map(String::from);
+    let base_url = parsed.get("baseURL").and_then(|v| v.as_str()).map(String::from);
+    Some((model, base_url))
+}
+
 fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;
@@ -1057,6 +1152,12 @@ fn resolve_repl_model(cli_model: String) -> String {
     }
     if let Some(config_model) = config_model_for_current_dir() {
         return resolve_model_alias_with_config(&config_model);
+    }
+    // Check HackCode config (~/.config/hackcode/config.json)
+    if let Some((Some(model), _base_url)) = hackcode_config() {
+        if !model.is_empty() {
+            return model;
+        }
     }
     cli_model
 }
@@ -1075,11 +1176,18 @@ fn format_connected_line(model: &str) -> String {
     format!("Connected: {model} via {provider}")
 }
 
+/// Tools that confuse local models and should be suppressed.
+const HIDDEN_TOOLS: &[&str] = &["SendUserMessage", "Brief", "Config"];
+
 fn filter_tool_specs(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
 ) -> Vec<ToolDefinition> {
-    tool_registry.definitions(allowed_tools)
+    tool_registry
+        .definitions(allowed_tools)
+        .into_iter()
+        .filter(|tool| !HIDDEN_TOOLS.contains(&tool.name.as_str()))
+        .collect()
 }
 
 fn parse_system_prompt_args(
@@ -6659,6 +6767,8 @@ impl AnthropicRuntimeClient {
         let mut pending_tool: Option<(String, String, String)> = None;
         let mut block_has_thinking_summary = false;
         let mut saw_stop = false;
+        let mut in_think_block = false;
+        let mut think_buffer = String::new();
         let mut received_any_event = false;
 
         loop {
@@ -6710,15 +6820,23 @@ impl AnthropicRuntimeClient {
                 ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                     ContentBlockDelta::TextDelta { text } => {
                         if !text.is_empty() {
-                            if let Some(progress_reporter) = &self.progress_reporter {
-                                progress_reporter.mark_text_phase(&text);
+                            // Filter out <think>...</think> blocks from
+                            // Qwen-family thinking models.  The tags arrive as
+                            // whole tokens in the stream, so simple string
+                            // matching is sufficient.
+                            think_buffer.push_str(&text);
+                            let filtered = strip_think_tags(&mut think_buffer, &mut in_think_block);
+                            if !filtered.is_empty() {
+                                if let Some(progress_reporter) = &self.progress_reporter {
+                                    progress_reporter.mark_text_phase(&filtered);
+                                }
+                                if let Some(rendered) = markdown_stream.push(&renderer, &filtered) {
+                                    write!(out, "{rendered}")
+                                        .and_then(|()| out.flush())
+                                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                }
+                                events.push(AssistantEvent::TextDelta(filtered));
                             }
-                            if let Some(rendered) = markdown_stream.push(&renderer, &text) {
-                                write!(out, "{rendered}")
-                                    .and_then(|()| out.flush())
-                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            }
-                            events.push(AssistantEvent::TextDelta(text));
                         }
                     }
                     ContentBlockDelta::InputJsonDelta { partial_json } => {
@@ -7532,6 +7650,50 @@ fn truncate_output_for_display(content: &str, max_lines: usize, max_chars: usize
         preview.push_str(DISPLAY_TRUNCATION_NOTICE);
     }
     preview
+}
+
+/// Strip `<think>...</think>` blocks from streamed text content.
+///
+/// Accumulates partial content in `buffer` and uses `in_think` to track
+/// whether we are currently inside a think block.  Returns the portion of
+/// the buffer that should be rendered (everything outside think blocks).
+fn strip_think_tags(buffer: &mut String, in_think: &mut bool) -> String {
+    let mut output = String::new();
+    loop {
+        if *in_think {
+            if let Some(end) = buffer.find("</think>") {
+                // Skip everything up to and including </think>
+                let after = end + "</think>".len();
+                buffer.drain(..after);
+                *in_think = false;
+            } else {
+                // Still inside think block, waiting for closing tag
+                break;
+            }
+        } else if let Some(start) = buffer.find("<think>") {
+            // Emit everything before <think>
+            output.push_str(&buffer[..start]);
+            buffer.drain(..start);
+            // Remove the <think> tag and enter think mode
+            buffer.drain(.."<think>".len());
+            *in_think = true;
+        } else {
+            // No think tags — but buffer might end with a partial `<`
+            // that could be the start of `<think>`.  Hold back anything
+            // from the last `<` onward.
+            if let Some(lt) = buffer.rfind('<') {
+                output.push_str(&buffer[..lt]);
+                let held = buffer[lt..].to_string();
+                buffer.clear();
+                buffer.push_str(&held);
+            } else {
+                output.push_str(buffer);
+                buffer.clear();
+            }
+            break;
+        }
+    }
+    output
 }
 
 fn render_thinking_block_summary(
@@ -8359,16 +8521,16 @@ mod tests {
         )
         .expect("project config should write");
 
-        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_config_home = std::env::var("HACKCODE_CONFIG_HOME").ok();
         let original_permission_mode = std::env::var("RUSTY_CLAUDE_PERMISSION_MODE").ok();
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
 
         let resolved = with_current_dir(&cwd, super::default_permission_mode);
 
         match original_config_home {
-            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
-            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+            Some(value) => std::env::set_var("HACKCODE_CONFIG_HOME", value),
+            None => std::env::remove_var("HACKCODE_CONFIG_HOME"),
         }
         match original_permission_mode {
             Some(value) => std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", value),
@@ -8393,16 +8555,16 @@ mod tests {
         )
         .expect("project config should write");
 
-        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_config_home = std::env::var("HACKCODE_CONFIG_HOME").ok();
         let original_permission_mode = std::env::var("RUSTY_CLAUDE_PERMISSION_MODE").ok();
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
         std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "read-only");
 
         let resolved = with_current_dir(&cwd, super::default_permission_mode);
 
         match original_config_home {
-            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
-            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+            Some(value) => std::env::set_var("HACKCODE_CONFIG_HOME", value),
+            None => std::env::remove_var("HACKCODE_CONFIG_HOME"),
         }
         match original_permission_mode {
             Some(value) => std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", value),
@@ -8435,10 +8597,10 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace should exist");
         std::fs::create_dir_all(&config_home).expect("config home should exist");
 
-        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_config_home = std::env::var("HACKCODE_CONFIG_HOME").ok();
         let original_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let original_auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
 
@@ -8463,8 +8625,8 @@ mod tests {
             .expect("stored credentials should exist");
 
         match original_config_home {
-            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
-            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+            Some(value) => std::env::set_var("HACKCODE_CONFIG_HOME", value),
+            None => std::env::remove_var("HACKCODE_CONFIG_HOME"),
         }
         match original_api_key {
             Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
@@ -8694,8 +8856,8 @@ mod tests {
         )
         .expect("project config should write");
 
-        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        let original_config_home = std::env::var("HACKCODE_CONFIG_HOME").ok();
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
 
         // when
         let direct = with_current_dir(&cwd, || resolve_model_alias_with_config("fast"));
@@ -8705,8 +8867,8 @@ mod tests {
         let builtin = with_current_dir(&cwd, || resolve_model_alias_with_config("haiku"));
 
         match original_config_home {
-            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
-            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+            Some(value) => std::env::set_var("HACKCODE_CONFIG_HOME", value),
+            None => std::env::remove_var("HACKCODE_CONFIG_HOME"),
         }
         std::fs::remove_dir_all(root).expect("temp config root should clean up");
 
@@ -9717,7 +9879,7 @@ mod tests {
         fs::create_dir_all(&root).expect("root dir");
         let config_home = root.join("config");
         fs::create_dir_all(&config_home).expect("config home dir");
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
         std::env::remove_var("ANTHROPIC_MODEL");
         std::env::set_var("ANTHROPIC_MODEL", "sonnet");
 
@@ -9726,7 +9888,7 @@ mod tests {
         assert_eq!(resolved, "claude-sonnet-4-6");
 
         std::env::remove_var("ANTHROPIC_MODEL");
-        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::remove_var("HACKCODE_CONFIG_HOME");
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -9737,14 +9899,14 @@ mod tests {
         fs::create_dir_all(&root).expect("root dir");
         let config_home = root.join("config");
         fs::create_dir_all(&config_home).expect("config home dir");
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::set_var("HACKCODE_CONFIG_HOME", &config_home);
         std::env::remove_var("ANTHROPIC_MODEL");
 
         let resolved = with_current_dir(&root, || resolve_repl_model(DEFAULT_MODEL.to_string()));
 
         assert_eq!(resolved, DEFAULT_MODEL);
 
-        std::env::remove_var("CLAW_CONFIG_HOME");
+        std::env::remove_var("HACKCODE_CONFIG_HOME");
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 

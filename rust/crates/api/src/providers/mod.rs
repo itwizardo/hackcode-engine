@@ -198,9 +198,11 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     // Ollama local models — HuggingFace models pulled via `ollama pull hf.co/...`
     // and any model containing a colon (e.g. "llama3.2:1b", "gemma:7b")
     if canonical.starts_with("hf.co/")
+        || canonical.starts_with("hackcode")
         || canonical.contains(':')
         || canonical.starts_with("llama")
         || canonical.starts_with("gemma")
+        || canonical.starts_with("qwen")
         || canonical.starts_with("mistral")
         || canonical.starts_with("phi")
         || canonical.starts_with("codellama")
@@ -531,7 +533,7 @@ mod tests {
 
     #[test]
     fn qwen_prefix_routes_to_dashscope_not_anthropic() {
-        // User request from Discord #clawcode-get-help: web3g wants to use
+        // User request from Discord #hackcode-get-help: web3g wants to use
         // Qwen 3.6 Plus via native Alibaba DashScope API (not OpenRouter,
         // which has lower rate limits). metadata_for_model must route
         // qwen/* and bare qwen-* to the OpenAi provider kind pointed at
@@ -574,8 +576,8 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("api-plugin-max-tokens-{nanos}"));
         let cwd = root.join("project");
-        let home = root.join("home").join(".claw");
-        std::fs::create_dir_all(cwd.join(".claw")).expect("project config dir");
+        let home = root.join("home").join(".hackcode");
+        std::fs::create_dir_all(cwd.join(".hackcode")).expect("project config dir");
         std::fs::create_dir_all(&home).expect("home config dir");
         std::fs::write(
             home.join("settings.json"),
