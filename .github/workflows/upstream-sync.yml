@@ -1,0 +1,128 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/ultraworkers/claw-code.git
+          git fetch upstream main
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count dev..upstream/main)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          echo "$BEHIND new commits from upstream"
+
+      - name: Create sync branch and merge
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          BRANCH="upstream-sync/$(date +%Y-%m-%d)"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          git checkout -b "$BRANCH" dev
+          if git merge upstream/main --no-edit; then
+            echo "clean=true" >> $GITHUB_OUTPUT
+          else
+            echo "clean=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: List conflicts if any
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'false'
+        id: conflicts
+        run: |
+          CONFLICT_FILES=$(git diff --name-only --diff-filter=U | sort)
+          CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | wc -l | tr -d ' ')
+          echo "count=$CONFLICT_COUNT" >> $GITHUB_OUTPUT
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONFLICT_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Conflicting files:"
+          echo "$CONFLICT_FILES"
+          # Abort merge so PR shows the diff clearly
+          git merge --abort
+          # Re-merge with ours strategy for conflicting files to create a pushable branch
+          git merge upstream/main --no-edit -X ours || true
+
+      - name: Push sync branch
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git push -u origin "${{ steps.merge.outputs.branch }}"
+
+      - name: Create PR (clean merge)
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          gh pr create \
+            --title "[Upstream Sync] $BEHIND commits — clean merge" \
+            --body "$(cat <<'BODY'
+          ## Upstream Sync
+
+          **$BEHIND** new commits from [claw-code](https://github.com/ultraworkers/claw-code) main.
+
+          Clean merge — no conflicts. Review and merge when ready.
+          BODY
+          )" \
+            --base dev \
+            --label "upstream-sync"
+
+      - name: Create PR (with conflicts)
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BEHIND=${{ steps.check.outputs.behind }}
+          CONFLICTS="${{ steps.conflicts.outputs.count }}"
+          FILES="${{ steps.conflicts.outputs.files }}"
+          gh pr create \
+            --title "[Upstream Sync] $BEHIND commits — $CONFLICTS conflicts" \
+            --body "$(cat <<BODY
+          ## Upstream Sync
+
+          **$BEHIND** new commits from [claw-code](https://github.com/ultraworkers/claw-code) main.
+
+          ### Conflicts need manual resolution
+
+          The following files have merge conflicts (resolved with \`ours\` strategy — your version kept):
+
+          $(echo "$FILES" | sed 's/^/- `/' | sed 's/$/`/')
+
+          **To resolve properly:**
+          \`\`\`bash
+          git fetch origin ${{ steps.merge.outputs.branch }}
+          git checkout ${{ steps.merge.outputs.branch }}
+          git fetch upstream main  # if not already added
+          git merge --abort 2>/dev/null
+          git reset --hard origin/dev
+          git merge upstream/main
+          # Resolve conflicts manually, then:
+          git add -A && git commit
+          git push --force origin ${{ steps.merge.outputs.branch }}
+          \`\`\`
+          BODY
+          )" \
+            --base dev \
+            --label "upstream-sync"
