@@ -210,7 +210,43 @@ HackCode auto-selects the best uncensored model for your hardware. All models ru
 
 The 35B MoE model uses only 3B active parameters per token — so it runs fast — while having 35B total parameters for high-quality output. Best of both worlds.
 
-You can also use any other Ollama model: `llama3`, `deepseek-coder`, `codestral`, `mistral` — HackCode works with all of them.
+### Pull Any Model from HuggingFace
+
+Not limited to the built-in list. During setup, press **`[h]`** to pull any GGUF model directly from [HuggingFace](https://huggingface.co):
+
+```
+[Step 2/3] AI Model
+
+  [a] Qwen3.5-4B Uncensored              ~3GB
+  [b] Qwen3.5-8B Uncensored              ~5GB
+  ...
+  [h] Pull any model from HuggingFace
+  [s] Skip model download
+
+  > h
+
+  HuggingFace Model Import
+  Paste a HuggingFace model URL or repo ID.
+
+  HuggingFace model> https://huggingface.co/dealignai/Gemma-4-31B-JANG_4M-CRACK
+
+  Pulling hf.co/dealignai/Gemma-4-31B-JANG_4M-CRACK from HuggingFace...
+```
+
+Works with any model on HuggingFace — jailbroken, uncensored, fine-tuned, experimental. Paste the URL or just the repo ID. Some community favorites:
+
+```bash
+# Jailbroken models
+ollama pull hf.co/dealignai/Gemma-4-31B-JANG_4M-CRACK
+
+# Uncensored coding models
+ollama pull hf.co/bartowski/Qwen3-30B-A3B-GGUF
+
+# Reasoning models
+ollama pull hf.co/unsloth/DeepSeek-R1-0528-GGUF
+```
+
+If it's on HuggingFace and it's GGUF, HackCode can run it.
 
 ---
 

@@ -172,18 +172,51 @@ pub fn run_setup() -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("  {BOLD}[{}]{RESET} {:35} {DIM}{:8} min {}GB RAM{RESET}{rec}", m.key, m.name, m.size, m.min_ram);
     }
+    println!("  {BOLD}[h]{RESET} Pull any model from HuggingFace");
     println!("  {BOLD}[s]{RESET} Skip model download");
     println!();
 
     let choice = ask(&format!("  {GREEN}>{RESET} "));
     let choice = if choice.is_empty() { recommended.key.to_string() } else { choice };
 
-    let model_id = MODELS.iter()
-        .find(|m| m.key == choice)
-        .map(|m| m.id)
-        .unwrap_or(recommended.id);
+    let model_id: String;
 
-    if choice != "s" && which("ollama") {
+    if choice == "h" {
+        println!();
+        println!("  {BOLD}HuggingFace Model Import{RESET}");
+        println!("  {DIM}Paste a HuggingFace model URL or repo ID.{RESET}");
+        println!("  {DIM}Examples:{RESET}");
+        println!("    {DIM}https://huggingface.co/dealignai/Gemma-4-31B-JANG_4M-CRACK{RESET}");
+        println!("    {DIM}bartowski/Qwen3-30B-A3B-GGUF{RESET}");
+        println!("    {DIM}unsloth/DeepSeek-R1-0528-GGUF{RESET}");
+        println!();
+        let hf_input = ask(&format!("  {GREEN}HuggingFace model>{RESET} "));
+        // Strip full URL to repo ID: huggingface.co/user/model -> user/model
+        let hf_repo = hf_input
+            .trim()
+            .replace("https://huggingface.co/", "")
+            .replace("http://huggingface.co/", "")
+            .trim_end_matches('/')
+            .to_string();
+
+        if hf_repo.is_empty() {
+            println!("  {RED}No model specified, using recommended model.{RESET}");
+            model_id = recommended.id.to_string();
+        } else {
+            let hf_ollama_id = format!("hf.co/{hf_repo}");
+            println!("\n  Pulling {BOLD}{hf_ollama_id}{RESET} from HuggingFace...");
+            println!("  {DIM}This may take a while depending on model size.{RESET}");
+            run_cmd(&format!("ollama pull \"{hf_ollama_id}\""));
+            model_id = hf_ollama_id;
+        }
+    } else {
+        model_id = MODELS.iter()
+            .find(|m| m.key == choice)
+            .map(|m| m.id.to_string())
+            .unwrap_or_else(|| recommended.id.to_string());
+    };
+
+    if choice != "s" && choice != "h" && which("ollama") {
         println!("\n  Pulling {BOLD}{model_id}{RESET}...");
         run_cmd(&format!("ollama pull \"{model_id}\""));
 
@@ -196,6 +229,18 @@ pub fn run_setup() -> Result<(), Box<dyn std::error::Error>> {
         run_cmd(&format!("ollama create hackcode-uncensored -f \"{}\"", modelfile_path.display()));
         println!("  {GREEN}✓{RESET} Model ready as {BOLD}hackcode-uncensored{RESET}");
     }
+
+    // For HuggingFace models, create alias with the pulled model
+    if choice == "h" && which("ollama") && !model_id.is_empty() {
+        let modelfile = format!(
+            "FROM {model_id}\nPARAMETER temperature 0.7\nPARAMETER num_ctx 32768\n"
+        );
+        let modelfile_path = config_dir().join("Modelfile");
+        let _ = fs::write(&modelfile_path, &modelfile);
+        run_cmd(&format!("ollama create hackcode-uncensored -f \"{}\"", modelfile_path.display()));
+        println!("  {GREEN}✓{RESET} Model ready as {BOLD}hackcode-uncensored{RESET}");
+    }
+
     let model_id = "hackcode-uncensored";
     println!();
 
