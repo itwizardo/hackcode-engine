@@ -29,19 +29,25 @@
 
 ## The Problem
 
-Claude Code and Claude Mythos are powerful. But they require expensive subscriptions, send every prompt to the cloud, and **refuse to help with security work**. Ask them to scan a network, write an exploit, or crack a hash — they say no.
+Anthropic built the most powerful cybersecurity AI ever made — **Claude Mythos**. It found thousands of zero-day vulnerabilities in every major operating system and browser. Bugs that survived decades of human review. It chains exploits autonomously, writes working attack code, and in one test, [escaped its own sandbox and posted the exploit online](https://www.euronews.com/next/2026/04/08/why-anthropics-most-powerful-ai-model-mythos-preview-is-too-dangerous-for-public-release).
 
-If you're a penetration tester, red teamer, CTF player, or security researcher, you need an AI that actually works with you. Not against you.
+Then they decided it was **too dangerous for you to use**.
+
+Mythos is locked behind [Project Glasswing](https://www.anthropic.com/glasswing) — available only to Apple, Microsoft, Google, Amazon, and a handful of corporations. Not to independent security researchers. Not to pentesters. Not to you.
+
+Meanwhile, Claude Code — the AI terminal they *do* sell — refuses to scan a network, write an exploit, or crack a hash. You pay $20-$200/month for an AI that says *"I can't help with that."*
+
+If you're a penetration tester, red teamer, CTF player, or security researcher, you need an AI that works with you. Not against you.
 
 ## The Solution
 
-**HackCode** is built on [Claw Code](https://github.com/ultraworkers/claw-code) — an open-source recreation of Claude Code's engine, reverse-engineered and rewritten in Rust. Same architecture. Same tool-calling system. Same agentic workflow.
+**HackCode** is the AI hacking terminal they won't give you — built on [Claw Code](https://github.com/ultraworkers/claw-code), an open-source recreation of Claude Code's engine, reverse-engineered and rewritten in Rust. Same architecture. Same tool-calling system. Same agentic workflow.
 
-Except it's free, it's local, and it doesn't say no.
+Except it's free, it runs on your machine, and it doesn't say no.
 
-No API keys. No subscriptions. No cloud. No filters. No refusals.
+No API keys. No subscriptions. No cloud. No filters. No refusals. No waiting list.
 
-Just you, your machine, and an AI that does what you ask.
+They locked Mythos away. We built something you can actually use.
 
 ---
 
@@ -134,16 +140,19 @@ No manual prompting. No copy-pasting between tools. The AI drives. You supervise
 
 ## Why Not Claude Code / Claude Mythos?
 
-| | **Claude Code / Mythos** | **HackCode** |
-|---|---|---|
-| **Cost** | $20/month (Pro) or $200/month (Max) | Free forever |
-| **Privacy** | Every prompt sent to Anthropic's cloud | 100% local — nothing leaves your machine |
-| **Security tasks** | Refuses. "I can't help with that." | Uncensored. Does what you ask. |
-| **API key required** | Yes | No |
-| **Open source** | No | Yes — MIT license |
-| **Internet required** | Yes | No — fully offline capable |
-| **Engine** | Node.js | Rust — faster, no runtime overhead |
-| **Models** | Claude only (proprietary) | Any Ollama model (open weights) |
+| | **Claude Code** | **Claude Mythos** | **HackCode** |
+|---|---|---|---|
+| **Access** | Anyone (paid) | Invite-only corporations | Everyone — open source |
+| **Cost** | $20-$200/month | Not for sale | Free forever |
+| **Privacy** | Cloud only | Cloud only | 100% local — nothing leaves your machine |
+| **Security tasks** | Refuses | Powerful but locked away | Uncensored. Does what you ask. |
+| **Finds zero-days** | No | Yes — thousands found | Your model, your rules |
+| **Open source** | No | No | Yes — MIT license |
+| **Internet required** | Yes | Yes | No — fully offline capable |
+| **Engine** | Node.js | Proprietary | Rust — faster, no runtime overhead |
+| **Models** | Claude only | Mythos only | Any Ollama model (open weights) |
+
+> *Anthropic proved AI can be the most powerful security tool ever built. Then they locked it in a room with Amazon, Apple, and Microsoft. HackCode puts that power back in your hands.*
 
 ---
 
@@ -295,6 +304,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <strong>Stop paying for AI that says no.</strong><br>
+  <strong>They built the most powerful hacking AI ever made and locked it away.<br>We built one you can actually use.</strong><br><br>
   <code>curl -fsSL https://raw.githubusercontent.com/itwizardo/hackcode/dev/install.sh | bash</code>
 </p>
