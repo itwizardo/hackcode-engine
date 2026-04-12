@@ -43,7 +43,7 @@ If you're a penetration tester, red teamer, CTF player, or security researcher, 
 
 **HackCode** is the AI hacking terminal they won't give you — built on [Claw Code](https://github.com/ultraworkers/claw-code), an open-source recreation of Claude Code's engine, reverse-engineered and rewritten in Rust. Same architecture. Same tool-calling system. Same agentic workflow.
 
-Except it's free, it runs on your machine, and it doesn't say no.
+HackCode implements the **Capybara reasoning protocol** — the same [leaked reasoning tier](https://fortune.com/2026/03/26/anthropic-says-testing-mythos-powerful-new-ai-model-after-data-leak-reveals-its-existence-step-change-in-capabilities/) that powers Claude Mythos — adapted for local uncensored models. PhD-level reasoning. Automatic exploit chaining. Structured vulnerability classification. Running on your machine, not theirs.
 
 No API keys. No subscriptions. No cloud. No filters. No refusals. No waiting list.
 
@@ -99,6 +99,44 @@ $ hackcode
 ```
 
 Zero configuration. Zero decisions. It just works.
+
+---
+
+## The Capybara Protocol
+
+In March 2026, Anthropic [accidentally leaked](https://fortune.com/2026/03/26/anthropic-says-testing-mythos-powerful-new-ai-model-after-data-leak-reveals-its-existence-step-change-in-capabilities/) ~3,000 unpublished documents from an unsecured CMS cache. Among them: details of a new AI tier called **Capybara** — designed for PhD-level reasoning and advanced cybersecurity analysis. The model built on this tier, **Claude Mythos**, found thousands of zero-day vulnerabilities across every major OS and browser, [escaped its own sandbox](https://www.euronews.com/next/2026/04/08/why-anthropics-most-powerful-ai-model-mythos-preview-is-too-dangerous-for-public-release), and was deemed too dangerous for public release.
+
+HackCode implements the Capybara reasoning protocol locally:
+
+```
+┌─────────────────────────────────────────────────┐
+│           CAPYBARA REASONING PROTOCOL           │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  User Input: "scan 10.0.0.1"                    │
+│       │                                         │
+│       ▼                                         │
+│  [ENUMERATE] ── map all attack surfaces         │
+│       │                                         │
+│       ▼                                         │
+│  [EXECUTE] ── nmap, whatweb, gobuster, wpscan   │
+│       │                                         │
+│       ▼                                         │
+│  [CORRELATE] ── cross-reference tool outputs    │
+│       │                                         │
+│       ▼                                         │
+│  [EXPLOIT] ── chain vulnerabilities, write PoC  │
+│       │                                         │
+│       ▼                                         │
+│  [CLASSIFY] ── severity ratings for all finds   │
+│       │                                         │
+│       ▼                                         │
+│  [ESCALATE] ── pivot, persist, go deeper        │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+The AI doesn't just run one tool and stop. It **chains attacks** — nmap results feed into gobuster, gobuster results feed into sqlmap, SQL injection leads to file read, file read leads to credential extraction. Automatically.
 
 ---
 
