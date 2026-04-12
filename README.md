@@ -15,7 +15,7 @@
  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 ```
 
-<h3 align="center">The open-source, uncensored alternative to Claude Code.<br>Built for hackers. Runs entirely on your machine.</h3>
+<h3 align="center">The open-source, uncensored alternative to Claude Code & Claude Mythos.<br>Built for hackers. Runs entirely on your machine.</h3>
 
 <p align="center">
   <a href="#install">Install</a> &nbsp;&bull;&nbsp;
@@ -29,7 +29,7 @@
 
 ## The Problem
 
-Claude Code is powerful. But it requires a $20/month subscription, sends every prompt to the cloud, and **refuses to help with security work**. Ask it to scan a network, write an exploit, or crack a hash — it says no.
+Claude Code and Claude Mythos are powerful. But they require expensive subscriptions, send every prompt to the cloud, and **refuse to help with security work**. Ask them to scan a network, write an exploit, or crack a hash — they say no.
 
 If you're a penetration tester, red teamer, CTF player, or security researcher, you need an AI that actually works with you. Not against you.
 
@@ -132,9 +132,9 @@ No manual prompting. No copy-pasting between tools. The AI drives. You supervise
 
 ---
 
-## Why Not Claude Code?
+## Why Not Claude Code / Claude Mythos?
 
-| | **Claude Code** | **HackCode** |
+| | **Claude Code / Mythos** | **HackCode** |
 |---|---|---|
 | **Cost** | $20/month (Pro) or $200/month (Max) | Free forever |
 | **Privacy** | Every prompt sent to Anthropic's cloud | 100% local — nothing leaves your machine |
