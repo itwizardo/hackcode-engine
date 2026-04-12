@@ -373,6 +373,8 @@ The developers accept zero liability for misuse. Always get written authorizatio
 
 Engine forked from [Claw Code](https://github.com/ultraworkers/claw-code). Uncensored models by [tripolskypetr](https://ollama.com/tripolskypetr) and [vaultbox](https://ollama.com/vaultbox).
 
+> Looking for the original pre-fork HackCode repository? It's archived at [itwizardo/hackcode-legacy](https://github.com/itwizardo/hackcode-legacy).
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
