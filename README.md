@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/status-ALPHA-red?style=for-the-badge" alt="Alpha">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License">
-  <img src="https://img.shields.io/badge/platform-Kali%20Linux%20%7C%20macOS%20%7C%20Linux-blue?style=for-the-badge" alt="Platform">
   <img src="https://img.shields.io/badge/AI-100%25%20Local-purple?style=for-the-badge" alt="100% Local">
+  <img src="https://img.shields.io/badge/Uncensored-yes-red?style=for-the-badge" alt="Uncensored">
   <img src="https://img.shields.io/badge/engine-Rust-orange?style=for-the-badge" alt="Rust">
+  <img src="https://img.shields.io/badge/API%20Keys-None-brightgreen?style=for-the-badge" alt="No API Keys">
 </p>
 
 ```
@@ -13,32 +13,41 @@
  ██╔══██║██╔══██║██║     ██╔═██╗ ██║     ██║   ██║██║  ██║██╔══╝
  ██║  ██║██║  ██║╚██████╗██║  ██╗╚██████╗╚██████╔╝██████╔╝███████╗
  ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-  >> AI-Powered Hacking Terminal  |  100% Local  |  No Censorship <<
 ```
 
-# HackCode
+<h3 align="center">The open-source, uncensored alternative to Claude Code.<br>Built for hackers. Runs entirely on your machine.</h3>
 
-**The AI-powered hacking terminal for penetration testers, security researchers, CTF players, and red teamers.**
-
-HackCode is an open-source AI terminal built on a Rust engine forked from [Claw Code](https://github.com/antinomezco/claw-code). It runs **100% locally** with uncensored AI models via [Ollama](https://ollama.ai). No cloud APIs, no censorship, no data leaving your machine.
-
-> **ALPHA SOFTWARE — Expect rough edges, missing features, and breaking changes. Contributions and bug reports welcome.**
-
-> **LEGAL NOTICE:** This tool is built strictly for **authorized security testing, education, and research**. Using HackCode against systems without explicit written permission is **illegal** and may violate laws including the Computer Fraud and Abuse Act (CFAA), the Computer Misuse Act, and similar legislation worldwide. The developers accept **zero liability** for misuse. Always get written authorization before testing.
+<p align="center">
+  <a href="#install">Install</a> &nbsp;&bull;&nbsp;
+  <a href="#how-it-works">How It Works</a> &nbsp;&bull;&nbsp;
+  <a href="#models">Models</a> &nbsp;&bull;&nbsp;
+  <a href="#tools">Tools</a> &nbsp;&bull;&nbsp;
+  <a href="#contributing">Contributing</a>
+</p>
 
 ---
 
-## Why HackCode?
+## The Problem
 
-- **Rust engine** — Fast, native binary. No Node.js, no Python runtime, no garbage collection
-- **100% local** — Your prompts, targets, and results never leave your machine
-- **Uncensored models** — Uses Qwen3.5 uncensored models that won't refuse security tasks
-- **Tool-calling AI** — The model doesn't just chat — it runs `nmap`, reads files, chains tools automatically
-- **Auto-setup** — First run installs Ollama, downloads the right model for your hardware, installs security tools
-- **50+ built-in tools** — Bash, file read/write/edit, grep, glob, directory listing, and more
-- **Security tool scanner** — Detects 35 security tools across 6 categories
+Claude Code is powerful. But it requires a $20/month subscription, sends every prompt to the cloud, and **refuses to help with security work**. Ask it to scan a network, write an exploit, or crack a hash — it says no.
 
-## Quick Install
+If you're a penetration tester, red teamer, CTF player, or security researcher, you need an AI that actually works with you. Not against you.
+
+## The Solution
+
+**HackCode** is built on [Claw Code](https://github.com/ultraworkers/claw-code) — an open-source recreation of Claude Code's engine, reverse-engineered and rewritten in Rust. Same architecture. Same tool-calling system. Same agentic workflow.
+
+Except it's free, it's local, and it doesn't say no.
+
+No API keys. No subscriptions. No cloud. No filters. No refusals.
+
+Just you, your machine, and an AI that does what you ask.
+
+---
+
+## Install
+
+One command. That's it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itwizardo/hackcode/dev/install.sh | bash
@@ -49,18 +58,19 @@ Or build from source:
 ```bash
 git clone https://github.com/itwizardo/hackcode.git
 cd hackcode/rust
-cargo build --release
+cargo build --release -p rusty-claude-cli
 cp target/release/hackcode ~/.local/bin/
 ```
 
+Works on **macOS** (Apple Silicon & Intel) and **Linux** (x64 & ARM64). Runs natively on **Kali Linux**.
+
+---
+
 ## First Run
 
-Just run `hackcode`. The setup wizard handles everything:
+Run `hackcode`. The setup wizard does the rest.
 
-1. **Detects your hardware** — GPU, RAM, platform
-2. **Installs Ollama** — If not already installed
-3. **Downloads the best model** — Picks the largest uncensored model that fits your RAM
-4. **Installs security tools** — nmap, gobuster, nikto, hydra, sqlmap, etc. via Homebrew/apt
+It detects your hardware, installs [Ollama](https://ollama.ai) if needed, downloads the best uncensored model for your RAM, and installs security tools — all automatically.
 
 ```
 $ hackcode
@@ -71,30 +81,29 @@ $ hackcode
   Platform: macos (aarch64)
 
 [Step 1/3] AI Backend
-  Ollama ✓ installed
+  Ollama installed
 
 [Step 2/3] AI Model
   Recommended: Qwen3.5-35B-A3B Uncensored (MoE)
 
 [Step 3/3] Security Tools
-  ✓ All tools installed
+  All tools installed
 
 [HackCode] Setup complete!
 ```
 
-## Usage
+Zero configuration. Zero decisions. It just works.
 
-```bash
-hackcode              # Start the interactive REPL
-hackcode --scan       # Scan for installed security tools
-hackcode --setup      # Re-run the setup wizard
-hackcode --help       # Show all commands
+---
+
+## How It Works
+
+HackCode isn't a chatbot. It's an **AI agent** with full access to your terminal.
+
+You describe what you want. HackCode plans the approach, picks the right tools, executes commands, reads the output, and chains the next step — automatically. You watch it work.
+
 ```
-
-### Example Session
-
-```
-> scan 10.0.0.1
+> scan 10.0.0.1 and find vulnerabilities
 
   ▶ bash  $ nmap -sV -sC 10.0.0.1
 ✓ bash
@@ -104,93 +113,180 @@ hackcode --help       # Show all commands
   443/tcp  open  ssl/http Apache 2.4.52
   3306/tcp open  mysql    MySQL 8.0.32
 
-Found 4 open ports. Running whatweb for web fingerprinting...
+Found 4 open ports. Web server detected — fingerprinting...
 
   ▶ bash  $ whatweb http://10.0.0.1
 ✓ bash
   http://10.0.0.1 [200 OK] Apache[2.4.52], PHP[8.1.2], WordPress[6.4.2]
 
-WordPress detected. Running wpscan...
+WordPress 6.4.2 detected. Scanning for known vulnerabilities...
+
+  ▶ bash  $ wpscan --url http://10.0.0.1 --enumerate vp,vt,u
+✓ bash
+  [!] Title: WordPress < 6.4.3 - Admin+ PHP Object Injection
+  [!] Title: flavor flavor flavor flavor flavor flavor flavor 2.x - SQLi
+  ...
 ```
 
-The AI chains tools automatically — no manual prompting needed.
+No manual prompting. No copy-pasting between tools. The AI drives. You supervise.
+
+---
+
+## Why Not Claude Code?
+
+| | **Claude Code** | **HackCode** |
+|---|---|---|
+| **Cost** | $20/month (Pro) or $200/month (Max) | Free forever |
+| **Privacy** | Every prompt sent to Anthropic's cloud | 100% local — nothing leaves your machine |
+| **Security tasks** | Refuses. "I can't help with that." | Uncensored. Does what you ask. |
+| **API key required** | Yes | No |
+| **Open source** | No | Yes — MIT license |
+| **Internet required** | Yes | No — fully offline capable |
+| **Engine** | Node.js | Rust — faster, no runtime overhead |
+| **Models** | Claude only (proprietary) | Any Ollama model (open weights) |
+
+---
 
 ## Models
 
-HackCode works with any Ollama model, but defaults to uncensored Qwen3.5 variants:
+HackCode auto-selects the best uncensored model for your hardware. All models run locally via Ollama.
 
-| Model | Size | RAM | Best for |
-|-------|------|-----|----------|
-| Qwen3.5-4B Uncensored | ~3GB | 4GB+ | Low-end machines |
-| Qwen3.5-8B Uncensored | ~5GB | 8GB+ | Laptops |
-| Qwen3.5-14B Uncensored | ~9GB | 12GB+ | Good balance |
-| Qwen3.5-32B Uncensored | ~19GB | 24GB+ | High quality |
-| **Qwen3.5-35B-A3B Uncensored (MoE)** | **~21GB** | **24GB+** | **Best — fast + smart** |
-| Qwen3.5-35B Uncensored + Vision | ~23GB | 32GB+ | Image analysis |
+| Model | Download | RAM | Best For |
+|---|---|---|---|
+| Qwen3.5-4B Uncensored | ~3 GB | 4 GB+ | Low-end machines |
+| Qwen3.5-8B Uncensored | ~5 GB | 8 GB+ | Laptops |
+| Qwen3.5-14B Uncensored | ~9 GB | 12 GB+ | Good balance |
+| Qwen3.5-32B Uncensored | ~19 GB | 24 GB+ | High quality |
+| **Qwen3.5-35B-A3B Uncensored (MoE)** | **~21 GB** | **24 GB+** | **Recommended** |
 
-The 35B-A3B MoE model is recommended — it uses only 3B active parameters per token (fast inference) while having 35B total parameters (high quality).
+The 35B MoE model uses only 3B active parameters per token — so it runs fast — while having 35B total parameters for high-quality output. Best of both worlds.
+
+You can also use any other Ollama model: `llama3`, `deepseek-coder`, `codestral`, `mistral` — HackCode works with all of them.
+
+---
+
+## 50+ Built-in Tools
+
+HackCode doesn't just talk. It acts. The AI has direct access to:
+
+**Execution** — Run any command in bash, chain commands, pipe output
+
+**File System** — Read, write, edit, search, and navigate files across your entire machine
+
+**Code Intelligence** — Grep with regex, glob pattern matching, directory traversal
+
+**Session Memory** — Auto-saves every conversation, resume where you left off
+
+---
 
 ## Security Tool Scanner
+
+HackCode detects **35 security tools** across 6 categories and tells the AI what's available on your system:
 
 ```bash
 hackcode --scan
 ```
 
-Detects 35 tools across 6 categories:
-
 - **Recon** — nmap, masscan, whois, dig, amass, subfinder, assetfinder
-- **Web Testing** — gobuster, nikto, sqlmap, whatweb, wpscan, ffuf, dirb
-- **Exploitation** — metasploit, impacket, crackmapexec, evil-winrm, responder
-- **Password** — hydra, john, hashcat, medusa, ophcrack
+- **Web** — gobuster, nikto, sqlmap, whatweb, wpscan, ffuf, dirb
+- **Exploit** — metasploit, impacket, crackmapexec, evil-winrm, responder
+- **Passwords** — hydra, john, hashcat, medusa, ophcrack
 - **Forensics** — binwalk, foremost, volatility, exiftool, steghide, strings
 - **Utilities** — netcat, socat, proxychains, tor, sshuttle, tmux, jq, curl
 
-## Configuration
+Missing a tool? HackCode installs it for you automatically via Homebrew or apt.
 
-Config lives at `~/.config/hackcode/config.json`:
+---
 
-```json
-{
-  "model": "hackcode-uncensored",
-  "baseURL": "http://localhost:11434/v1"
-}
+## Usage
+
+```bash
+hackcode                # Start hacking
+hackcode --scan         # Show installed security tools
+hackcode --setup        # Re-run the setup wizard
+hackcode --update       # Update to the latest version
+hackcode --help         # Show all commands
 ```
 
-Re-run setup anytime with `hackcode --setup`.
+Inside the REPL:
+
+```
+/help                   # List all commands
+/tools                  # Show available security tools
+/status                 # Current session info
+/compact                # Summarize and free context
+```
+
+---
 
 ## Architecture
 
-HackCode's engine is a Rust fork of [Claw Code](https://github.com/antinomezco/claw-code), which is itself a Rust implementation of Claude Code's architecture. The engine provides:
-
-- **Streaming AI responses** with markdown rendering
-- **Tool execution** — sandboxed bash, file operations, grep/glob
-- **Session management** — auto-save, resume conversations
-- **Ollama integration** — auto-start, model management, OpenAI-compatible API
-- **Qwen3.5 native renderer** — proper tool-calling format, thinking mode handling
-
-### Project Structure
+HackCode is a fork of [Claw Code](https://github.com/ultraworkers/claw-code) — an open-source Rust recreation of Claude Code's architecture. Same streaming engine, same tool execution pipeline, same agentic loop. Rebuilt for offensive security.
 
 ```
 hackcode/
-├── rust/                    # Rust workspace
+├── rust/                       # Rust workspace
 │   └── crates/
-│       ├── rusty-claude-cli/  # CLI binary (main.rs, setup.rs, scanner.rs)
-│       ├── runtime/           # Conversation loop, prompts, config
-│       ├── api/               # Provider abstraction (Ollama, Anthropic, OpenAI)
-│       ├── tools/             # 50+ built-in tools
-│       ├── commands/          # Slash commands
-│       └── plugins/           # MCP plugin system
-├── cheatsheets/             # Security cheatsheets (SQLi, XSS, privesc, etc.)
-├── mcp-servers/             # Python MCP security tool servers
-├── Modelfile                # Ollama model configuration
-├── Containerfile            # Container build
-└── install.sh               # One-line installer
+│       ├── rusty-claude-cli/   # CLI — setup wizard, scanner, REPL
+│       ├── runtime/            # Conversation engine, prompts, sessions
+│       ├── api/                # Provider layer (Ollama, OpenAI-compat)
+│       ├── tools/              # 50+ built-in tools
+│       ├── commands/           # Slash commands
+│       └── plugins/            # MCP plugin system
+├── cheatsheets/                # Security cheatsheets (SQLi, XSS, privesc)
+├── mcp-servers/                # Python MCP tool servers
+├── Modelfile                   # Ollama model config
+└── install.sh                  # One-line installer
 ```
+
+Pure Rust. Single binary. No Node.js, no Python runtime, no garbage collection. Starts in milliseconds.
+
+---
+
+## Self-Updating
+
+HackCode checks for updates on startup. When a new version is available:
+
+```
+[HackCode] Update available! Run: hackcode --update
+```
+
+One command to pull the latest code and rebuild:
+
+```bash
+hackcode --update
+```
+
+Upstream improvements from Claw Code are synced daily via GitHub Actions — new tools, bug fixes, and engine improvements flow in automatically while your HackCode customizations stay intact.
+
+---
+
+## Contributing
+
+HackCode is open source and welcomes contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Areas where help is needed:
+- New security tool integrations
+- MCP server plugins for specific tools (Burp Suite, Wireshark, etc.)
+- Model fine-tuning for security tasks
+- Testing on different Linux distributions
+- Documentation and cheatsheets
+
+---
+
+## Legal
+
+This tool is built for **authorized security testing, education, and research only**.
+
+Using HackCode against systems without explicit written permission is illegal and may violate the Computer Fraud and Abuse Act (CFAA), the Computer Misuse Act, and similar laws worldwide.
+
+The developers accept zero liability for misuse. Always get written authorization before testing.
+
+---
 
 ## Credits
 
-- Engine forked from [Claw Code](https://github.com/antinomezco/claw-code) by [@antinomezco](https://github.com/antinomezco)
-- Uncensored models by [tripolskypetr](https://ollama.com/tripolskypetr) and [vaultbox](https://ollama.com/vaultbox)
+Engine forked from [Claw Code](https://github.com/ultraworkers/claw-code). Uncensored models by [tripolskypetr](https://ollama.com/tripolskypetr) and [vaultbox](https://ollama.com/vaultbox).
 
 ## License
 
@@ -199,6 +295,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <strong>Built for authorized security testing only.</strong><br>
-  <em>If you break the law, that's on you.</em>
+  <strong>Stop paying for AI that says no.</strong><br>
+  <code>curl -fsSL https://raw.githubusercontent.com/itwizardo/hackcode/dev/install.sh | bash</code>
 </p>
