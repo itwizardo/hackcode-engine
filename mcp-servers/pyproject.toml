@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hackcode-mcp"
+version = "0.1.0"
+description = "MCP servers for HackCode security tools"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+hackcode-mcp-recon = "hackcode_mcp.recon:main"
+hackcode-mcp-web = "hackcode_mcp.web:main"
+hackcode-mcp-exploit = "hackcode_mcp.exploit:main"
+hackcode-mcp-passwords = "hackcode_mcp.passwords:main"
+hackcode-mcp-utils = "hackcode_mcp.utils:main"

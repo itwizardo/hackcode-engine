@@ -101,6 +101,9 @@ const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--compact",
     "--base-commit",
     "-p",
+    "--setup",
+    "--scan",
+    "--update",
 ];
 
 type AllowedToolSet = BTreeSet<String>;
@@ -271,6 +274,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             reasoning_effort,
         } => {
             ensure_hackcode_ready()?;
+            check_for_updates_async();
             run_repl(
                 model,
                 allowed_tools,
@@ -284,6 +288,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Setup => setup::run_setup()?,
         CliAction::Scan => {
             scanner::run_scanner();
+        }
+        CliAction::Update => {
+            run_self_update()?;
         }
     }
     Ok(())
@@ -375,6 +382,7 @@ enum CliAction {
     HelpTopic(LocalHelpTopic),
     Setup,
     Scan,
+    Update,
     // prompt-mode formatting is only supported for non-interactive runs
     Help {
         output_format: CliOutputFormat,
@@ -460,6 +468,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             "--scan" | "--tools" => {
                 return Ok(CliAction::Scan);
+            }
+            "--update" => {
+                return Ok(CliAction::Update);
             }
             "--model" => {
                 let value = args
@@ -1123,6 +1134,119 @@ fn ensure_hackcode_ready() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Check for updates by comparing the local Git SHA with the remote HEAD.
+/// Runs on a background thread so it doesn't block startup.  Prints a
+/// one-line notice if a newer version is available.
+fn check_for_updates_async() {
+    let local_sha = GIT_SHA.unwrap_or("unknown").to_string();
+    std::thread::spawn(move || {
+        // Quick HTTP fetch — 3 second timeout so it never slows the REPL
+        let output = std::process::Command::new("git")
+            .args([
+                "ls-remote",
+                "https://github.com/itwizardo/hackcode.git",
+                "refs/heads/dev",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+
+        if let Ok(output) = output {
+            let remote = String::from_utf8_lossy(&output.stdout);
+            let remote_sha = remote.split_whitespace().next().unwrap_or("");
+            if !remote_sha.is_empty() && !remote_sha.starts_with(&local_sha) {
+                eprintln!(
+                    "\n\x1b[38;2;0;255;65m[HackCode]\x1b[0m \x1b[1mUpdate available!\x1b[0m \
+                     Run: \x1b[1mhackcode --update\x1b[0m\n"
+                );
+            }
+        }
+    });
+}
+
+/// Pull latest source from GitHub and rebuild the binary in-place.
+fn run_self_update() -> Result<(), Box<dyn std::error::Error>> {
+    let green = "\x1b[38;2;0;255;65m";
+    let dim = "\x1b[2m";
+    let bold = "\x1b[1m";
+    let nc = "\x1b[0m";
+
+    eprintln!("{green}[HackCode]{nc} Checking for updates...");
+
+    let src_dir = env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".hackcode-src"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/.hackcode-src"));
+
+    // Clone or pull
+    if src_dir.join(".git").exists() {
+        eprintln!("  {dim}Pulling latest...{nc}");
+        let pull = Command::new("git")
+            .args(["-C", &src_dir.to_string_lossy(), "pull", "--quiet"])
+            .status();
+        if pull.map_or(true, |s| !s.success()) {
+            // If pull fails, re-clone
+            let _ = std::fs::remove_dir_all(&src_dir);
+            let status = Command::new("git")
+                .args([
+                    "clone",
+                    "--quiet",
+                    "https://github.com/itwizardo/hackcode.git",
+                    &src_dir.to_string_lossy(),
+                ])
+                .status()?;
+            if !status.success() {
+                return Err("Failed to clone repo".into());
+            }
+        }
+    } else {
+        eprintln!("  {dim}Cloning repo...{nc}");
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                "https://github.com/itwizardo/hackcode.git",
+                &src_dir.to_string_lossy(),
+            ])
+            .status()?;
+        if !status.success() {
+            return Err("Failed to clone repo".into());
+        }
+    }
+
+    // Build
+    eprintln!("  {dim}Building...{nc}");
+    let build_dir = src_dir.join("rust");
+    let status = Command::new("cargo")
+        .args(["build", "--release", "-p", "rusty-claude-cli"])
+        .current_dir(&build_dir)
+        .status()?;
+    if !status.success() {
+        return Err("Build failed".into());
+    }
+
+    // Install
+    let install_dir = env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".local").join("bin"))
+        .unwrap_or_else(|_| PathBuf::from("/usr/local/bin"));
+    std::fs::create_dir_all(&install_dir)?;
+    let binary_src = build_dir.join("target").join("release").join("hackcode");
+    let binary_dst = install_dir.join("hackcode");
+    std::fs::copy(&binary_src, &binary_dst)?;
+
+    // Get the new SHA
+    let new_sha = Command::new("git")
+        .args(["-C", &src_dir.to_string_lossy(), "rev-parse", "--short", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    eprintln!("\n{green}[HackCode]{nc} Updated to {bold}{new_sha}{nc} ✓");
+    eprintln!("  Restart hackcode to use the new version.\n");
 
     Ok(())
 }
@@ -2561,6 +2685,56 @@ fn format_auto_compaction_notice(removed: usize) -> String {
     format!("[auto-compacted: removed {removed} messages]")
 }
 
+fn random_done_message() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const MESSAGES: &[&str] = &[
+        "Execution complete",
+        "Task finished",
+        "All operations done",
+        "Mission accomplished",
+        "Output delivered",
+        "Analysis complete",
+        "Payload delivered",
+        "Results ready",
+        "Scan complete",
+        "Operations finished",
+        "Processing complete",
+        "Job done",
+        "Sequence complete",
+        "All tasks executed",
+        "Workflow complete",
+        "Session processed",
+        "Request fulfilled",
+        "Actions completed",
+        "Run finished",
+        "Pipeline complete",
+    ];
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as usize);
+    MESSAGES[seed % MESSAGES.len()].to_string()
+}
+
+fn random_fail_message() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const MESSAGES: &[&str] = &[
+        "Operation failed",
+        "Execution error",
+        "Task aborted",
+        "Request failed",
+        "Process terminated",
+        "Pipeline broken",
+        "Run failed",
+        "Error encountered",
+        "Action failed",
+        "Unexpected fault",
+    ];
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as usize);
+    MESSAGES[seed % MESSAGES.len()].to_string()
+}
+
 fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
     parse_git_status_metadata_for(
         &env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -3653,7 +3827,7 @@ impl LiveCli {
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
         spinner.tick(
-            "🦀 Thinking...",
+            "",
             TerminalRenderer::new().color_theme(),
             &mut stdout,
         )?;
@@ -3664,7 +3838,7 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 spinner.finish(
-                    "✨ Done",
+                    &random_done_message(),
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
@@ -3681,7 +3855,7 @@ impl LiveCli {
             Err(error) => {
                 runtime.shutdown_plugins()?;
                 spinner.fail(
-                    "❌ Request failed",
+                    &random_fail_message(),
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
@@ -6796,6 +6970,8 @@ impl AnthropicRuntimeClient {
 
             match event {
                 ApiStreamEvent::MessageStart(start) => {
+                    // Kill the spinner animation — streaming has begun
+                    Spinner::stop_global();
                     for block in start.message.content {
                         push_output_block(
                             block,
@@ -6872,6 +7048,9 @@ impl AnthropicRuntimeClient {
                 }
                 ApiStreamEvent::MessageDelta(delta) => {
                     events.push(AssistantEvent::Usage(delta.usage.token_usage()));
+                    if let Some(reason) = delta.delta.stop_reason {
+                        events.push(AssistantEvent::StopReason(reason));
+                    }
                 }
                 ApiStreamEvent::MessageStop(_) => {
                     saw_stop = true;
@@ -7227,7 +7406,7 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
         "bash" | "Bash" => format_bash_call(&parsed),
         "read_file" | "Read" => {
             let path = extract_tool_path(&parsed);
-            format!("\x1b[2m📄 Reading {path}…\x1b[0m")
+            format!("\x1b[2m{path}\x1b[0m")
         }
         "write_file" | "Write" => {
             let path = extract_tool_path(&parsed);
@@ -7235,7 +7414,7 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
                 .get("content")
                 .and_then(|value| value.as_str())
                 .map_or(0, |content| content.lines().count());
-            format!("\x1b[1;32m✏️ Writing {path}\x1b[0m \x1b[2m({lines} lines)\x1b[0m")
+            format!("\x1b[2m{path}\x1b[0m \x1b[2m({lines} lines)\x1b[0m")
         }
         "edit_file" | "Edit" => {
             let path = extract_tool_path(&parsed);
@@ -7250,26 +7429,38 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
             format!(
-                "\x1b[1;33m📝 Editing {path}\x1b[0m{}",
+                "\x1b[2m{path}\x1b[0m{}",
                 format_patch_preview(old_value, new_value)
                     .map(|preview| format!("\n{preview}"))
                     .unwrap_or_default()
             )
         }
-        "glob_search" | "Glob" => format_search_start("🔎 Glob", &parsed),
-        "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
-        "web_search" | "WebSearch" => parsed
-            .get("query")
-            .and_then(|value| value.as_str())
-            .unwrap_or("?")
-            .to_string(),
-        _ => summarize_tool_payload(input),
+        "glob_search" | "Glob" => format_search_start("Glob", &parsed),
+        "grep_search" | "Grep" => format_search_start("Grep", &parsed),
+        "web_search" | "WebSearch" => {
+            let query = parsed
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            format!("\x1b[2m{query}\x1b[0m")
+        }
+        _ => format!("\x1b[2m{}\x1b[0m", summarize_tool_payload(input)),
     };
 
-    let border = "─".repeat(name.len() + 8);
-    format!(
-        "\x1b[38;5;245m╭─ \x1b[1;36m{name}\x1b[0;38;5;245m ─╮\x1b[0m\n\x1b[38;5;245m│\x1b[0m {detail}\n\x1b[38;5;245m╰{border}╯\x1b[0m"
-    )
+    // Indent any continuation lines in the detail to align under the tool name
+    let indented_detail = detail
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                line.to_string()
+            } else {
+                format!("      {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\x1b[38;5;245m  ▶ \x1b[1;36m{name}\x1b[0m  {indented_detail}")
 }
 
 fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
@@ -7302,10 +7493,10 @@ fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
 
 const DISPLAY_TRUNCATION_NOTICE: &str =
     "\x1b[2m… output truncated for display; full result preserved in session.\x1b[0m";
-const READ_DISPLAY_MAX_LINES: usize = 80;
-const READ_DISPLAY_MAX_CHARS: usize = 6_000;
-const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 60;
-const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
+const READ_DISPLAY_MAX_LINES: usize = 0;
+const READ_DISPLAY_MAX_CHARS: usize = 0;
+const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 15;
+const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 1_500;
 
 fn extract_tool_path(parsed: &serde_json::Value) -> String {
     parsed
@@ -7326,7 +7517,7 @@ fn format_search_start(label: &str, parsed: &serde_json::Value) -> String {
         .get("path")
         .and_then(|value| value.as_str())
         .unwrap_or(".");
-    format!("{label} {pattern}\n\x1b[2min {scope}\x1b[0m")
+    format!("{label} \x1b[38;5;255m{pattern}\x1b[0m \x1b[2min {scope}\x1b[0m")
 }
 
 fn format_patch_preview(old_value: &str, new_value: &str) -> Option<String> {
@@ -7349,8 +7540,8 @@ fn format_bash_call(parsed: &serde_json::Value) -> String {
         String::new()
     } else {
         format!(
-            "\x1b[48;5;236;38;5;255m $ {} \x1b[0m",
-            truncate_for_summary(command, 160)
+            "\x1b[38;5;245m$\x1b[0m \x1b[38;5;255m{}\x1b[0m",
+            truncate_for_summary(command, 120)
         )
     }
 }
@@ -7364,52 +7555,76 @@ fn first_visible_line(text: &str) -> &str {
 fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
     use std::fmt::Write as _;
 
-    let mut lines = vec![format!("{icon} \x1b[38;5;245mbash\x1b[0m")];
+    let mut header = format!("{icon} \x1b[38;5;245mbash\x1b[0m");
     if let Some(task_id) = parsed
         .get("backgroundTaskId")
         .and_then(|value| value.as_str())
     {
-        write!(&mut lines[0], " backgrounded ({task_id})").expect("write to string");
+        write!(&mut header, " \x1b[2mbackgrounded ({task_id})\x1b[0m").expect("write to string");
     } else if let Some(status) = parsed
         .get("returnCodeInterpretation")
         .and_then(|value| value.as_str())
         .filter(|status| !status.is_empty())
     {
-        write!(&mut lines[0], " {status}").expect("write to string");
+        write!(&mut header, " \x1b[2m{status}\x1b[0m").expect("write to string");
     }
 
-    if let Some(stdout) = parsed.get("stdout").and_then(|value| value.as_str()) {
-        if !stdout.trim().is_empty() {
-            lines.push(truncate_output_for_display(
-                stdout,
-                TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                TOOL_OUTPUT_DISPLAY_MAX_CHARS,
+    // Count stdout lines for summary
+    let stdout = parsed
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let stderr = parsed
+        .get("stderr")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let stdout_lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let stderr_lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    // Show compact output: first N lines dimmed, with truncation
+    let mut parts = vec![header];
+
+    if !stdout_lines.is_empty() {
+        let show = stdout_lines.len().min(TOOL_OUTPUT_DISPLAY_MAX_LINES);
+        let preview: String = stdout_lines[..show]
+            .iter()
+            .map(|l| format!("  \x1b[2m{l}\x1b[0m"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if stdout_lines.len() > TOOL_OUTPUT_DISPLAY_MAX_LINES {
+            parts.push(format!(
+                "{preview}\n  \x1b[2m… +{} more lines\x1b[0m",
+                stdout_lines.len() - TOOL_OUTPUT_DISPLAY_MAX_LINES
             ));
-        }
-    }
-    if let Some(stderr) = parsed.get("stderr").and_then(|value| value.as_str()) {
-        if !stderr.trim().is_empty() {
-            lines.push(format!(
-                "\x1b[38;5;203m{}\x1b[0m",
-                truncate_output_for_display(
-                    stderr,
-                    TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                    TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-                )
-            ));
+        } else {
+            parts.push(preview);
         }
     }
 
-    lines.join("\n\n")
+    if !stderr_lines.is_empty() {
+        let show = stderr_lines.len().min(5);
+        let preview: String = stderr_lines[..show]
+            .iter()
+            .map(|l| format!("  \x1b[38;5;203m{l}\x1b[0m"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if stderr_lines.len() > 5 {
+            parts.push(format!(
+                "{preview}\n  \x1b[2m… +{} more stderr lines\x1b[0m",
+                stderr_lines.len() - 5
+            ));
+        } else {
+            parts.push(preview);
+        }
+    }
+
+    parts.join("\n")
 }
 
 fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let file = parsed.get("file").unwrap_or(parsed);
     let path = extract_tool_path(file);
-    let start_line = file
-        .get("startLine")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1);
     let num_lines = file
         .get("numLines")
         .and_then(serde_json::Value::as_u64)
@@ -7418,18 +7633,9 @@ fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
         .get("totalLines")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(num_lines);
-    let content = file
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let end_line = start_line.saturating_add(num_lines.saturating_sub(1));
-
+    // Compact: just show file path and line count, no content dump
     format!(
-        "{icon} \x1b[2m📄 Read {path} (lines {}-{} of {})\x1b[0m\n{}",
-        start_line,
-        end_line.max(start_line),
-        total_lines,
-        truncate_output_for_display(content, READ_DISPLAY_MAX_LINES, READ_DISPLAY_MAX_CHARS)
+        "{icon} \x1b[2mRead {path} ({total_lines} lines)\x1b[0m"
     )
 }
 
@@ -7444,7 +7650,7 @@ fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
         .and_then(|value| value.as_str())
         .map_or(0, |content| content.lines().count());
     format!(
-        "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lines)\x1b[0m",
+        "{icon} \x1b[2m{} {path} ({line_count} lines)\x1b[0m",
         if kind == "create" { "Wrote" } else { "Updated" },
     )
 }
@@ -7493,8 +7699,8 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     });
 
     match preview {
-        Some(preview) => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m\n{preview}"),
-        None => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m"),
+        Some(preview) => format!("{icon} \x1b[2mEdited {path}{suffix}\x1b[0m\n{preview}"),
+        None => format!("{icon} \x1b[2mEdited {path}{suffix}\x1b[0m"),
     }
 }
 
@@ -7503,23 +7709,7 @@ fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
         .get("numFiles")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let filenames = parsed
-        .get("filenames")
-        .and_then(|value| value.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|value| value.as_str())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    if filenames.is_empty() {
-        format!("{icon} \x1b[38;5;245mglob_search\x1b[0m matched {num_files} files")
-    } else {
-        format!("{icon} \x1b[38;5;245mglob_search\x1b[0m matched {num_files} files\n{filenames}")
-    }
+    format!("{icon} \x1b[38;5;245mGlob\x1b[0m \x1b[2m{num_files} files matched\x1b[0m")
 }
 
 fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
@@ -7531,39 +7721,9 @@ fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
         .get("numFiles")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let content = parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let filenames = parsed
-        .get("filenames")
-        .and_then(|value| value.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|value| value.as_str())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    let summary = format!(
-        "{icon} \x1b[38;5;245mgrep_search\x1b[0m {num_matches} matches across {num_files} files"
-    );
-    if !content.trim().is_empty() {
-        format!(
-            "{summary}\n{}",
-            truncate_output_for_display(
-                content,
-                TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-            )
-        )
-    } else if !filenames.is_empty() {
-        format!("{summary}\n{filenames}")
-    } else {
-        summary
-    }
+    format!(
+        "{icon} \x1b[38;5;245mGrep\x1b[0m \x1b[2m{num_matches} matches in {num_files} files\x1b[0m"
+    )
 }
 
 fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value) -> String {
@@ -7575,18 +7735,14 @@ fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value
         }
         _ => parsed.to_string(),
     };
-    let preview = truncate_output_for_display(
-        &rendered_output,
-        TOOL_OUTPUT_DISPLAY_MAX_LINES,
-        TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-    );
-
-    if preview.is_empty() {
+    let trimmed = rendered_output.trim();
+    if trimmed.is_empty() {
         format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
-    } else if preview.contains('\n') {
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n{preview}")
     } else {
-        format!("{icon} \x1b[38;5;245m{name}:\x1b[0m {preview}")
+        // Show just the first line as a compact preview
+        let first_line = trimmed.lines().next().unwrap_or("");
+        let summary = truncate_for_summary(first_line, 100);
+        format!("{icon} \x1b[38;5;245m{name}\x1b[0m \x1b[2m{summary}\x1b[0m")
     }
 }
 
@@ -10723,12 +10879,12 @@ UU conflicted.rs",
             r#"{"file":{"filePath":"src/main.rs","content":"hello","numLines":1,"startLine":1,"totalLines":1}}"#,
             false,
         );
-        assert!(done.contains("📄 Read src/main.rs"));
-        assert!(done.contains("hello"));
+        assert!(done.contains("Read src/main.rs"));
+        assert!(done.contains("1 lines"));
     }
 
     #[test]
-    fn tool_rendering_truncates_large_read_output_for_display_only() {
+    fn tool_rendering_read_shows_compact_summary_only() {
         let content = (0..200)
             .map(|index| format!("line {index:03}"))
             .collect::<Vec<_>>()
@@ -10746,11 +10902,11 @@ UU conflicted.rs",
 
         let rendered = format_tool_result("read_file", &output, false);
 
-        assert!(rendered.contains("line 000"));
-        assert!(rendered.contains("line 079"));
+        // Compact: just summary, no content dump
+        assert!(rendered.contains("Read src/main.rs"));
+        assert!(rendered.contains("200 lines"));
+        assert!(!rendered.contains("line 000"));
         assert!(!rendered.contains("line 199"));
-        assert!(rendered.contains("full result preserved in session"));
-        assert!(output.contains("line 199"));
     }
 
     #[test]
@@ -10768,15 +10924,17 @@ UU conflicted.rs",
 
         let rendered = format_tool_result("bash", &output, false);
 
+        // Compact: first 15 lines visible, rest truncated
         assert!(rendered.contains("stdout 000"));
-        assert!(rendered.contains("stdout 059"));
+        assert!(rendered.contains("stdout 014"));
+        assert!(!rendered.contains("stdout 015"));
         assert!(!rendered.contains("stdout 119"));
-        assert!(rendered.contains("full result preserved in session"));
+        assert!(rendered.contains("more lines"));
         assert!(output.contains("stdout 119"));
     }
 
     #[test]
-    fn tool_rendering_truncates_generic_long_output_for_display_only() {
+    fn tool_rendering_generic_shows_compact_first_line() {
         let items = (0..120)
             .map(|index| format!("payload {index:03}"))
             .collect::<Vec<_>>();
@@ -10788,17 +10946,14 @@ UU conflicted.rs",
 
         let rendered = format_tool_result("plugin_echo", &output, false);
 
+        // Compact: shows only the tool name and first-line summary
         assert!(rendered.contains("plugin_echo"));
-        assert!(rendered.contains("payload 000"));
-        assert!(rendered.contains("payload 040"));
-        assert!(!rendered.contains("payload 080"));
+        // No full content dump
         assert!(!rendered.contains("payload 119"));
-        assert!(rendered.contains("full result preserved in session"));
-        assert!(output.contains("payload 119"));
     }
 
     #[test]
-    fn tool_rendering_truncates_raw_generic_output_for_display_only() {
+    fn tool_rendering_raw_generic_shows_compact_first_line() {
         let output = (0..120)
             .map(|index| format!("raw {index:03}"))
             .collect::<Vec<_>>()
@@ -10806,12 +10961,11 @@ UU conflicted.rs",
 
         let rendered = format_tool_result("plugin_echo", &output, false);
 
+        // Compact: shows tool name and first line only
         assert!(rendered.contains("plugin_echo"));
         assert!(rendered.contains("raw 000"));
-        assert!(rendered.contains("raw 059"));
+        assert!(!rendered.contains("raw 059"));
         assert!(!rendered.contains("raw 119"));
-        assert!(rendered.contains("full result preserved in session"));
-        assert!(output.contains("raw 119"));
     }
 
     #[test]

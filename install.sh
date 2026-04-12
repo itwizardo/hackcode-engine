@@ -7,7 +7,7 @@ BOLD='\033[1m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-REPO="itwizardo/hackcode-engine"
+REPO="itwizardo/hackcode"
 INSTALL_DIR="${HOME}/.local/bin"
 
 echo ""
@@ -91,9 +91,25 @@ if [ "$INSTALLED" = false ]; then
         git clone --quiet "https://github.com/${REPO}.git" "$HACKCODE_SRC"
     fi
 
-    echo -e "  ${DIM}Building (takes ~2 minutes on first run)...${NC}"
     cd "$HACKCODE_SRC/rust"
-    cargo build --release -p rusty-claude-cli 2>&1 | tail -5
+
+    # Build with live progress percentage (~200 crates expected)
+    EST=200
+    BUILT=0
+    cargo build --release -p rusty-claude-cli 2>&1 | while IFS= read -r line; do
+        case "$line" in
+            *Compiling*)
+                BUILT=$((BUILT + 1))
+                PCT=$((BUILT * 100 / EST))
+                [ "$PCT" -gt 99 ] && PCT=99
+                CRATE=$(echo "$line" | sed 's/.*Compiling \([^ ]*\).*/\1/')
+                printf "\r  ${GREEN}[%3d%%]${NC} Compiling ${DIM}%-30s${NC}" "$PCT" "$CRATE"
+                ;;
+            *Finished*)
+                printf "\r  ${GREEN}[100%%]${NC} Build complete %-40s\n" " "
+                ;;
+        esac
+    done
 
     mkdir -p "$INSTALL_DIR"
     cp "target/release/hackcode" "$INSTALL_DIR/hackcode"
@@ -146,9 +162,9 @@ if [ -n "$OLLAMA_BIN" ]; then
     if [ "$MODEL_COUNT" = "0" ]; then
         echo ""
         echo -e "  ${DIM}No models found. Pulling default model...${NC}"
-        echo -e "  ${BOLD}Gemma 4 E4B Uncensored${NC} (~5GB download)"
+        echo -e "  ${BOLD}Qwen3.5-8B Uncensored${NC} (~5GB download)"
         echo ""
-        $OLLAMA_BIN pull "hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Q4_K_M" || true
+        $OLLAMA_BIN pull "tripolskypetr/qwen3.5-uncensored-aggressive:8b" || true
     fi
 else
     echo -e "  ${RED}Ollama not found${NC}"

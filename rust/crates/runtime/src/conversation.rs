@@ -36,6 +36,8 @@ pub enum AssistantEvent {
     },
     Usage(TokenUsage),
     PromptCache(PromptCacheEvent),
+    /// The stop reason from the provider (e.g. "end_turn", "length").
+    StopReason(String),
     MessageStop,
 }
 
@@ -330,7 +332,7 @@ where
                     return Err(error);
                 }
             };
-            let (assistant_message, usage, turn_prompt_cache_events) =
+            let (assistant_message, usage, turn_prompt_cache_events, stop_reason) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
                     Err(error) => {
@@ -364,6 +366,18 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
+                // If the model stopped because it hit the output token
+                // limit (finish_reason = "length"), automatically inject
+                // a "continue" message so it picks up where it left off.
+                let hit_length_limit = stop_reason
+                    .as_deref()
+                    .map_or(false, |r| r == "length");
+                if hit_length_limit {
+                    self.session
+                        .push_user_text("continue where you left off")
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                    continue;
+                }
                 break;
             }
 
@@ -680,6 +694,7 @@ fn build_assistant_message(
         ConversationMessage,
         Option<TokenUsage>,
         Vec<PromptCacheEvent>,
+        Option<String>,
     ),
     RuntimeError,
 > {
@@ -688,6 +703,7 @@ fn build_assistant_message(
     let mut prompt_cache_events = Vec::new();
     let mut finished = false;
     let mut usage = None;
+    let mut stop_reason = None;
 
     for event in events {
         match event {
@@ -698,6 +714,7 @@ fn build_assistant_message(
             }
             AssistantEvent::Usage(value) => usage = Some(value),
             AssistantEvent::PromptCache(event) => prompt_cache_events.push(event),
+            AssistantEvent::StopReason(reason) => stop_reason = Some(reason),
             AssistantEvent::MessageStop => {
                 finished = true;
             }
@@ -712,13 +729,16 @@ fn build_assistant_message(
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("assistant stream produced no content"));
+        blocks.push(ContentBlock::Text {
+            text: String::from("(no response — try rephrasing your request)"),
+        });
     }
 
     Ok((
         ConversationMessage::assistant_with_usage(blocks, usage),
         usage,
         prompt_cache_events,
+        stop_reason,
     ))
 }
 
@@ -1597,18 +1617,16 @@ mod tests {
     }
 
     #[test]
-    fn build_assistant_message_requires_content() {
+    fn build_assistant_message_inserts_placeholder_on_empty_content() {
         // given
         let events = vec![AssistantEvent::MessageStop];
 
         // when
-        let error =
-            build_assistant_message(events).expect_err("assistant messages should require content");
+        let (message, _, _, _) =
+            build_assistant_message(events).expect("empty content should produce placeholder");
 
         // then
-        assert!(error
-            .to_string()
-            .contains("assistant stream produced no content"));
+        assert!(!message.blocks.is_empty());
     }
 
     #[test]

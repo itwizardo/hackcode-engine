@@ -1,10 +1,10 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
+use crossterm::cursor::{MoveToColumn, MoveTo, SavePosition, RestorePosition};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
 use crossterm::terminal::{Clear, ClearType};
-use crossterm::{execute, queue};
+use crossterm::execute;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
@@ -44,38 +44,191 @@ impl Default for ColorTheme {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Global flag to stop the spinner from anywhere (e.g. when streaming begins).
+static SPINNER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct Spinner {
-    frame_index: usize,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Spinner {
-    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const MESSAGES: [&str; 64] = [
+        // What the model is actually doing
+        "Thinking",
+        "Processing request",
+        "Analyzing input",
+        "Generating response",
+        "Reasoning",
+        "Evaluating approach",
+        "Formulating response",
+        "Composing answer",
+        "Considering options",
+        "Deliberating",
+        "Reflecting",
+        "Planning approach",
+        "Structuring response",
+        "Preparing output",
+        "Working through it",
+        "Understanding context",
+        // Neural network operations (honest)
+        "Running inference",
+        "Processing tokens",
+        "Sampling next tokens",
+        "Attending to context",
+        "Propagating forward",
+        "Activating layers",
+        "Computing embeddings",
+        "Cross-attending",
+        "Generating tokens",
+        "Decoding output",
+        "Processing attention",
+        "Running transformer layers",
+        "Scoring candidates",
+        "Selecting tokens",
+        "Computing probabilities",
+        "Streaming tokens",
+        // Problem solving
+        "Parsing the problem",
+        "Breaking it down",
+        "Mapping the solution",
+        "Connecting the dots",
+        "Weighing alternatives",
+        "Synthesizing information",
+        "Correlating data",
+        "Distilling insights",
+        "Assembling pieces",
+        "Checking reasoning",
+        "Verifying approach",
+        "Refining answer",
+        "Iterating on solution",
+        "Optimizing response",
+        "Exploring possibilities",
+        // Computing (generic but honest)
+        "Loading context window",
+        "Building response tree",
+        "Traversing solution space",
+        "Computing next move",
+        "Evaluating paths",
+        "Scanning context",
+        "Resolving dependencies",
+        "Expanding search",
+        "Narrowing scope",
+        "Finalizing approach",
+        "Aggregating results",
+        "Compiling response",
+        "Rendering output",
+        "Encoding answer",
+        "Converging on solution",
+        "Projecting output",
+        "Transforming input",
+    ];
 
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self { handle: None }
     }
 
+    /// Clear the spinner from the bottom row of the terminal.
+    fn clear_bottom_row() {
+        let mut stdout = io::stdout();
+        if let Ok((_, height)) = crossterm::terminal::size() {
+            let _ = execute!(
+                stdout,
+                SavePosition,
+                MoveTo(0, height - 1),
+                Clear(ClearType::CurrentLine),
+                RestorePosition
+            );
+            let _ = stdout.flush();
+        }
+    }
+
+    /// Stop the spinner from outside (e.g. when streaming begins).
+    /// Returns `true` if the spinner was actually running.
+    pub fn stop_global() -> bool {
+        let was_active = SPINNER_ACTIVE.swap(
+            false,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        if was_active {
+            // Brief pause so the spinner thread finishes its current frame
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Self::clear_bottom_row();
+        }
+        was_active
+    }
+
+    /// Start the animated spinner pinned to the bottom row of the terminal.
+    /// Uses binary `0`/`1` animation with rotating status messages.
+    /// Stops automatically when `stop_global()` is called (e.g. when
+    /// the model starts streaming) or when `finish()`/`fail()` is called.
     pub fn tick(
         &mut self,
-        label: &str,
+        _label: &str,
         theme: &ColorTheme,
-        out: &mut impl Write,
+        _out: &mut impl Write,
     ) -> io::Result<()> {
-        let frame = Self::FRAMES[self.frame_index % Self::FRAMES.len()];
-        self.frame_index += 1;
-        queue!(
-            out,
-            SavePosition,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_active),
-            Print(format!("{frame} {label}")),
-            ResetColor,
-            RestorePosition
-        )?;
-        out.flush()
+        SPINNER_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let active_color = theme.spinner_active;
+
+        // Randomise starting message so it's not the same every time
+        let start_idx = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as usize)
+                % Self::MESSAGES.len()
+        };
+
+        self.handle = Some(std::thread::spawn(move || {
+            let mut stdout = io::stdout();
+            let mut frame: usize = 0;
+            let mut msg_idx: usize = start_idx;
+
+            while SPINNER_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+                let (_, height) = crossterm::terminal::size().unwrap_or((80, 24));
+                let bit = if frame % 2 == 0 { "0" } else { "1" };
+                let dots = match frame % 3 {
+                    0 => ".  ",
+                    1 => ".. ",
+                    _ => "...",
+                };
+                let msg = Self::MESSAGES[msg_idx % Self::MESSAGES.len()];
+
+                // Pin to bottom row — save cursor, jump to bottom,
+                // draw, then restore cursor so streaming output
+                // is unaffected.
+                let _ = execute!(
+                    stdout,
+                    SavePosition,
+                    MoveTo(0, height - 1),
+                    Clear(ClearType::CurrentLine),
+                    SetForegroundColor(active_color),
+                    Print(format!("{bit} {msg}{dots}")),
+                    ResetColor,
+                    RestorePosition
+                );
+                let _ = stdout.flush();
+
+                frame += 1;
+                if frame % 3 == 0 {
+                    msg_idx += 1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }));
+
+        Ok(())
+    }
+
+    /// Stop the background animation thread and wait for it to exit.
+    fn stop_animation(&mut self) {
+        SPINNER_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        Self::clear_bottom_row();
     }
 
     pub fn finish(
@@ -84,7 +237,7 @@ impl Spinner {
         theme: &ColorTheme,
         out: &mut impl Write,
     ) -> io::Result<()> {
-        self.frame_index = 0;
+        self.stop_animation();
         execute!(
             out,
             MoveToColumn(0),
@@ -102,7 +255,7 @@ impl Spinner {
         theme: &ColorTheme,
         out: &mut impl Write,
     ) -> io::Result<()> {
-        self.frame_index = 0;
+        self.stop_animation();
         execute!(
             out,
             MoveToColumn(0),
