@@ -4,13 +4,19 @@
   <img src="https://img.shields.io/badge/Uncensored-yes-red?style=for-the-badge" alt="Uncensored">
   <img src="https://img.shields.io/badge/engine-Rust-orange?style=for-the-badge" alt="Rust">
   <img src="https://img.shields.io/badge/API%20Keys-None-brightgreen?style=for-the-badge" alt="No API Keys">
+  <img src="https://img.shields.io/badge/Cost-%240-blue?style=for-the-badge" alt="$0 Cost">
+  <img src="https://img.shields.io/badge/Status-Beta-yellow?style=for-the-badge" alt="Beta">
 </p>
 
 <div align="center">
   <img src="assets/hackcode-terminal.png" alt="HackCode Terminal" width="800">
 </div>
 
-<h3 align="center">The open-source, uncensored alternative to Claude Code & Claude Mythos.<br>Built for hackers. Runs entirely on your machine.</h3>
+<h3 align="center">The open-source, uncensored alternative to Claude Code & Claude Mythos.<br>Built for hackers. Runs entirely on your machine. $0 forever.</h3>
+
+<p align="center">
+  <strong>⚠️ HackCode is in beta.</strong> Things will break. Output quality varies by model. We're actively improving tool chaining, response formatting, and model support. <a href="#contributing">Contributions welcome.</a>
+</p>
 
 <p align="center">
   <a href="#install">Install</a> &nbsp;&bull;&nbsp;
