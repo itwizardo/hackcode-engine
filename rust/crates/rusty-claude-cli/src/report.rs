@@ -13,46 +13,70 @@ const DIM: &str = "\x1b[90m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 
-/// Security-related keywords that indicate an audit report.
-const AUDIT_KEYWORDS: &[&str] = &[
+/// Strong indicators — phrases that only appear in actual audit reports,
+/// not in casual "what can you do?" capability listings.
+const REPORT_PHRASES: &[&str] = &[
     "security audit",
-    "vulnerability",
-    "exploit",
-    "severity",
+    "penetration test",
+    "security report",
+    "audit report",
     "threat assessment",
-    "findings",
+    "vulnerability assessment",
+    "security assessment",
+];
+
+/// Finding-level keywords that signal real scan results (not capabilities).
+const FINDING_KEYWORDS: &[&str] = &[
     "cve-",
     "critical risk",
     "high risk",
     "medium risk",
     "low risk",
-    "attack surface",
-    "penetration test",
-    "security report",
-    "audit report",
-    "reconnaissance",
+    "severity:",
+    "finding:",
     "hardcoded secret",
-    "injection",
     "misconfiguration",
+    "open port",
+    "exposed service",
 ];
 
-/// Minimum keyword matches required to trigger PDF generation.
-const MIN_KEYWORD_MATCHES: usize = 3;
+/// Past-tense / results language — real reports describe what was found.
+const RESULTS_LANGUAGE: &[&str] = &[
+    "found",
+    "detected",
+    "discovered",
+    "identified",
+    "vulnerable to",
+    "is exposed",
+    "was found",
+    "were found",
+    "recommendation",
+    "remediation",
+];
 
 /// Minimum response length to consider for report generation.
-const MIN_REPORT_LENGTH: usize = 500;
+const MIN_REPORT_LENGTH: usize = 600;
 
 /// Check if the AI response looks like a security audit report.
+///
+/// To avoid false positives on casual capability listings, we require:
+///   - At least 1 report-level phrase (e.g. "security audit"), AND
+///   - At least 2 finding-level keywords (e.g. "cve-", "high risk"), AND
+///   - At least 1 results-language marker (e.g. "found", "detected")
 pub fn is_audit_report(text: &str) -> bool {
     if text.len() < MIN_REPORT_LENGTH {
         return false;
     }
     let lower = text.to_lowercase();
-    let matches = AUDIT_KEYWORDS
+
+    let has_report_phrase = REPORT_PHRASES.iter().any(|kw| lower.contains(kw));
+    let finding_hits = FINDING_KEYWORDS
         .iter()
         .filter(|kw| lower.contains(*kw))
         .count();
-    matches >= MIN_KEYWORD_MATCHES
+    let has_results_lang = RESULTS_LANGUAGE.iter().any(|kw| lower.contains(kw));
+
+    has_report_phrase && finding_hits >= 2 && has_results_lang
 }
 
 /// Strip ANSI escape codes from text.
