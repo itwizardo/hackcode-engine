@@ -92,7 +92,7 @@ jobs:
           BODY
           )" \
             --base dev \
-            --label "upstream-sync"
+            --label "upstream-sync" || true
 
       - name: Create PR (with conflicts)
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'false'
@@ -130,4 +130,4 @@ jobs:
           BODY
           )" \
             --base dev \
-            --label "upstream-sync"
+            --label "upstream-sync" || true
