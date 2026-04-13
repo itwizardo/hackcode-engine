@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, MoveTo, SavePosition, RestorePosition};
+use crossterm::cursor::{MoveToColumn, MoveTo, SavePosition, RestorePosition, position};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::execute;
@@ -47,6 +47,10 @@ impl Default for ColorTheme {
 /// Global flag to stop the spinner from anywhere (e.g. when streaming begins).
 static SPINNER_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Row where the spinner should render (set when tick() is called).
+static SPINNER_ROW: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(0);
 
 pub struct Spinner {
     handle: Option<std::thread::JoinHandle<()>>,
@@ -129,19 +133,18 @@ impl Spinner {
         Self { handle: None }
     }
 
-    /// Clear the spinner from the bottom row of the terminal.
-    fn clear_bottom_row() {
+    /// Clear the spinner from the row where it was rendered.
+    fn clear_spinner_row() {
         let mut stdout = io::stdout();
-        if let Ok((_, height)) = crossterm::terminal::size() {
-            let _ = execute!(
-                stdout,
-                SavePosition,
-                MoveTo(0, height - 1),
-                Clear(ClearType::CurrentLine),
-                RestorePosition
-            );
-            let _ = stdout.flush();
-        }
+        let row = SPINNER_ROW.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = execute!(
+            stdout,
+            SavePosition,
+            MoveTo(0, row),
+            Clear(ClearType::CurrentLine),
+            RestorePosition
+        );
+        let _ = stdout.flush();
     }
 
     /// Stop the spinner from outside (e.g. when streaming begins).
@@ -154,12 +157,12 @@ impl Spinner {
         if was_active {
             // Brief pause so the spinner thread finishes its current frame
             std::thread::sleep(std::time::Duration::from_millis(50));
-            Self::clear_bottom_row();
+            Self::clear_spinner_row();
         }
         was_active
     }
 
-    /// Start the animated spinner pinned to the bottom row of the terminal.
+    /// Start the animated spinner right below the current cursor position.
     /// Uses binary `0`/`1` animation with rotating status messages.
     /// Stops automatically when `stop_global()` is called (e.g. when
     /// the model starts streaming) or when `finish()`/`fail()` is called.
@@ -171,6 +174,10 @@ impl Spinner {
     ) -> io::Result<()> {
         SPINNER_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
         let active_color = theme.spinner_active;
+
+        // Capture current cursor row — spinner renders on the next line
+        let spinner_row = position().map(|(_, row)| row + 1).unwrap_or(0);
+        SPINNER_ROW.store(spinner_row, std::sync::atomic::Ordering::SeqCst);
 
         // Randomise starting message so it's not the same every time
         let start_idx = {
@@ -187,7 +194,7 @@ impl Spinner {
             let mut msg_idx: usize = start_idx;
 
             while SPINNER_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-                let (_, height) = crossterm::terminal::size().unwrap_or((80, 24));
+                let row = SPINNER_ROW.load(std::sync::atomic::Ordering::SeqCst);
                 let bit = if frame % 2 == 0 { "0" } else { "1" };
                 let dots = match frame % 3 {
                     0 => ".  ",
@@ -196,13 +203,13 @@ impl Spinner {
                 };
                 let msg = Self::MESSAGES[msg_idx % Self::MESSAGES.len()];
 
-                // Pin to bottom row — save cursor, jump to bottom,
-                // draw, then restore cursor so streaming output
-                // is unaffected.
+                // Render right below the prompt — save cursor, jump to
+                // spinner row, draw, then restore cursor so streaming
+                // output is unaffected.
                 let _ = execute!(
                     stdout,
                     SavePosition,
-                    MoveTo(0, height - 1),
+                    MoveTo(0, row),
                     Clear(ClearType::CurrentLine),
                     SetForegroundColor(active_color),
                     Print(format!("{bit} {msg}{dots}")),
@@ -228,7 +235,7 @@ impl Spinner {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        Self::clear_bottom_row();
+        Self::clear_spinner_row();
     }
 
     pub fn finish(
@@ -238,10 +245,10 @@ impl Spinner {
         out: &mut impl Write,
     ) -> io::Result<()> {
         self.stop_animation();
+        // Print done message on a new line — don't clear the current line
+        // because it may contain the last line of the AI response.
         execute!(
             out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
             SetForegroundColor(theme.spinner_done),
             Print(format!("✔ {label}\n")),
             ResetColor
@@ -258,8 +265,6 @@ impl Spinner {
         self.stop_animation();
         execute!(
             out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
             SetForegroundColor(theme.spinner_failed),
             Print(format!("✘ {label}\n")),
             ResetColor
@@ -420,7 +425,8 @@ impl TerminalRenderer {
             );
         }
 
-        output.trim_end().to_string()
+        let trimmed = output.trim_end().to_string();
+        wrap_to_terminal(&trimmed)
     }
 
     #[must_use]
@@ -1061,6 +1067,101 @@ fn strip_ansi(input: &str) -> String {
     }
 
     output
+}
+
+/// Word-wrap rendered text to fit the terminal width, preserving ANSI codes.
+/// Lines inside code blocks (between ╭─ and ╰─) are NOT wrapped.
+fn wrap_to_terminal(text: &str) -> String {
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(120)
+        .max(40); // Never wrap narrower than 40
+
+    let mut result = String::with_capacity(text.len());
+    let mut in_code_block = false;
+
+    for line in text.split('\n') {
+        // Track code block boundaries (they use ╭─ / ╰─)
+        let stripped = strip_ansi(line);
+        let trimmed = stripped.trim();
+        if trimmed.starts_with("╭─") {
+            in_code_block = true;
+        }
+        if trimmed.starts_with("╰─") {
+            in_code_block = false;
+        }
+
+        // Don't wrap code blocks or short lines
+        let visible_len = visible_width(line);
+        if in_code_block || visible_len <= term_width || trimmed.is_empty() {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Word-wrap this line, respecting ANSI escape sequences
+        wrap_line_ansi(line, term_width, &mut result);
+        result.push('\n');
+    }
+
+    // Remove the trailing newline we added
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+/// Word-wrap a single line while preserving ANSI escape codes.
+fn wrap_line_ansi(line: &str, max_width: usize, output: &mut String) {
+    // Split the line into segments: either ANSI sequences or visible text
+    let mut col = 0;
+    let mut chars = line.chars().peekable();
+    let mut word_buf = String::new();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Consume the entire ANSI escape sequence (doesn't add visible width)
+            output.push(ch);
+            while let Some(&next) = chars.peek() {
+                output.push(*chars.peek().unwrap());
+                chars.next();
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if ch == ' ' || ch == '\t' {
+            // Space — flush word buffer, then add space
+            if !word_buf.is_empty() {
+                // Check if the word fits on the current line
+                if col + word_buf.len() > max_width && col > 0 {
+                    output.push('\n');
+                    col = 0;
+                }
+                output.push_str(&word_buf);
+                col += word_buf.len();
+                word_buf.clear();
+            }
+            if col > 0 {
+                if col + 1 > max_width {
+                    output.push('\n');
+                    col = 0;
+                } else {
+                    output.push(' ');
+                    col += 1;
+                }
+            }
+        } else {
+            word_buf.push(ch);
+        }
+    }
+
+    // Flush remaining word
+    if !word_buf.is_empty() {
+        if col + word_buf.len() > max_width && col > 0 {
+            output.push('\n');
+        }
+        output.push_str(&word_buf);
+    }
 }
 
 #[cfg(test)]

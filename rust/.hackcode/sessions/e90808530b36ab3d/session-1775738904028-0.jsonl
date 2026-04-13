@@ -1,0 +1,3 @@
+{"created_at_ms":1775738904028,"session_id":"session-1775738904028-0","type":"session_meta","updated_at_ms":1775738904028,"version":1}
+{"text":"hi","timestamp_ms":1775738905995,"type":"prompt_history"}
+{"message":{"blocks":[{"text":"hi","type":"text"}],"role":"user"},"type":"message"}

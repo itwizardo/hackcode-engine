@@ -1,0 +1,27 @@
+[
+  {
+    "content": "Enumerate project structure and files",
+    "activeForm": "Enumerating project structure",
+    "status": "completed"
+  },
+  {
+    "content": "Read and analyze main source code files",
+    "activeForm": "Reading core source code",
+    "status": "in_progress"
+  },
+  {
+    "content": "Scan for hardcoded secrets and credentials",
+    "activeForm": "Scanning for hardcoded secrets",
+    "status": "pending"
+  },
+  {
+    "content": "Identify security vulnerabilities and misconfigurations",
+    "activeForm": "Identifying vulnerabilities",
+    "status": "pending"
+  },
+  {
+    "content": "Write comprehensive security analysis report",
+    "activeForm": "Writing security report",
+    "status": "pending"
+  }
+]
