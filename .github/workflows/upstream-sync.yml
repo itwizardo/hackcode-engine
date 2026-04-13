@@ -35,6 +35,11 @@ jobs:
           echo "behind=$BEHIND" >> $GITHUB_OUTPUT
           echo "$BEHIND new commits from upstream"
 
+      - name: Delete old sync branches
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git push origin --delete upstream-sync/$(date +%Y-%m-%d) 2>/dev/null || true
+
       - name: Create sync branch and merge
         if: steps.check.outputs.behind != '0'
         id: merge
@@ -68,7 +73,7 @@ jobs:
       - name: Push sync branch
         if: steps.check.outputs.behind != '0'
         run: |
-          git push -u origin "${{ steps.merge.outputs.branch }}"
+          git push -u origin "${{ steps.merge.outputs.branch }}" --force
 
       - name: Create PR (clean merge)
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'true'
