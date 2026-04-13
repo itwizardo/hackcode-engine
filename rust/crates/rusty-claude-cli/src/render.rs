@@ -52,6 +52,11 @@ static SPINNER_ACTIVE: std::sync::atomic::AtomicBool =
 static SPINNER_ROW: std::sync::atomic::AtomicU16 =
     std::sync::atomic::AtomicU16::new(0);
 
+/// Guard against clearing the spinner row twice — the second clear would wipe
+/// the AI response that was printed on the same row after streaming started.
+static SPINNER_ROW_CLEARED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 pub struct Spinner {
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -134,7 +139,14 @@ impl Spinner {
     }
 
     /// Clear the spinner from the row where it was rendered.
+    /// Only clears once per spinner cycle — a second call is a no-op so we
+    /// don't accidentally wipe the AI response that now occupies that row.
     fn clear_spinner_row() {
+        // swap(true) returns the *previous* value. If it was already true,
+        // the row was already cleared — skip.
+        if SPINNER_ROW_CLEARED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let mut stdout = io::stdout();
         let row = SPINNER_ROW.load(std::sync::atomic::Ordering::SeqCst);
         let _ = execute!(
@@ -173,6 +185,8 @@ impl Spinner {
         _out: &mut impl Write,
     ) -> io::Result<()> {
         SPINNER_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Reset the cleared guard so the new spinner's row can be cleared once.
+        SPINNER_ROW_CLEARED.store(false, std::sync::atomic::Ordering::SeqCst);
         let active_color = theme.spinner_active;
 
         // Capture current cursor row — spinner renders on the next line
