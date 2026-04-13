@@ -356,29 +356,6 @@ No extra commands. No flags. It just knows when you ran an audit and drops a cle
 
 ---
 
-## Reacher Dashboard
-
-HackCode ships with [Reacher Dashboard](https://github.com/itwizardo/reacher-dashboard) — a self-hosted email verification UI powered by the open-source [Reacher](https://github.com/reacherhq/check-if-email-exists) API.
-
-Verify emails before they hit your mailing list. Catch invalid, disposable, and risky addresses. Export clean lists as CSV.
-
-- **Bulk verification** — drag-drop a CSV, verify thousands of emails
-- **5x parallel** — verifies 5 emails at once
-- **Filter tabs** — All / Safe / Risky / Invalid / Unknown
-- **Separate exports** — export only safe emails, only invalid, or all
-- **Self-hosted** — runs on your own server, no third-party SaaS
-- **Single HTML file** — zero dependencies, works offline
-
-```bash
-# Deploy on any VPS
-git clone https://github.com/itwizardo/reacher-dashboard.git
-cd reacher-dashboard && docker-compose up -d
-```
-
-Open `http://your-server-ip` and start verifying.
-
----
-
 ## Self-Updating
 
 HackCode checks for updates on startup. When a new version is available:
