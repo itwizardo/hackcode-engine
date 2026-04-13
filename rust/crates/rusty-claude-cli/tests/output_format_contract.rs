@@ -4,6 +4,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use runtime::Session;
 use serde_json::Value;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -173,13 +174,15 @@ fn dump_manifests_and_init_emit_json_when_requested() {
     fs::create_dir_all(&root).expect("temp dir should exist");
 
     let upstream = write_upstream_fixture(&root);
-    let manifests = assert_json_command_with_env(
+    let manifests = assert_json_command(
         &root,
-        &["--output-format", "json", "dump-manifests"],
-        &[(
-            "CLAUDE_CODE_UPSTREAM",
+        &[
+            "--output-format",
+            "json",
+            "dump-manifests",
+            "--manifests-dir",
             upstream.to_str().expect("utf8 upstream"),
-        )],
+        ],
     );
     assert_eq!(manifests["kind"], "dump-manifests");
     assert_eq!(manifests["commands"], 1);
@@ -206,7 +209,7 @@ fn doctor_and_resume_status_emit_json_when_requested() {
     assert!(summary["failures"].as_u64().is_some());
 
     let checks = doctor["checks"].as_array().expect("doctor checks");
-    assert_eq!(checks.len(), 5);
+    assert_eq!(checks.len(), 6);
     let check_names = checks
         .iter()
         .map(|check| {
@@ -218,7 +221,27 @@ fn doctor_and_resume_status_emit_json_when_requested() {
         .collect::<Vec<_>>();
     assert_eq!(
         check_names,
-        vec!["auth", "config", "workspace", "sandbox", "system"]
+        vec![
+            "auth",
+            "config",
+            "install source",
+            "workspace",
+            "sandbox",
+            "system"
+        ]
+    );
+
+    let install_source = checks
+        .iter()
+        .find(|check| check["name"] == "install source")
+        .expect("install source check");
+    assert_eq!(
+        install_source["official_repo"],
+        "https://github.com/ultraworkers/claw-code"
+    );
+    assert_eq!(
+        install_source["deprecated_install"],
+        "cargo install claw-code"
     );
 
     let workspace = checks
@@ -236,12 +259,7 @@ fn doctor_and_resume_status_emit_json_when_requested() {
     assert!(sandbox["enabled"].is_boolean());
     assert!(sandbox["fallback_reason"].is_null() || sandbox["fallback_reason"].is_string());
 
-    let session_path = root.join("session.jsonl");
-    fs::write(
-        &session_path,
-        "{\"type\":\"session_meta\",\"version\":3,\"session_id\":\"resume-json\",\"created_at_ms\":0,\"updated_at_ms\":0}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"blocks\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
-    )
-    .expect("session should write");
+    let session_path = write_session_fixture(&root, "resume-json", Some("hello"));
     let resumed = assert_json_command(
         &root,
         &[
@@ -253,7 +271,8 @@ fn doctor_and_resume_status_emit_json_when_requested() {
         ],
     );
     assert_eq!(resumed["kind"], "status");
-    assert_eq!(resumed["model"], "restored-session");
+    // model is null in resume mode (not known without --model flag)
+    assert!(resumed["model"].is_null());
     assert_eq!(resumed["usage"]["messages"], 1);
     assert!(resumed["workspace"]["cwd"].as_str().is_some());
     assert!(resumed["sandbox"]["filesystem_mode"].as_str().is_some());
@@ -267,12 +286,7 @@ fn resumed_inventory_commands_emit_structured_json_when_requested() {
     fs::create_dir_all(&config_home).expect("config home should exist");
     fs::create_dir_all(&home).expect("home should exist");
 
-    let session_path = root.join("session.jsonl");
-    fs::write(
-        &session_path,
-        "{\"type\":\"session_meta\",\"version\":3,\"session_id\":\"resume-inventory-json\",\"created_at_ms\":0,\"updated_at_ms\":0}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"blocks\":[{\"type\":\"text\",\"text\":\"inventory\"}]}}\n",
-    )
-    .expect("session should write");
+    let session_path = write_session_fixture(&root, "resume-inventory-json", Some("inventory"));
 
     let mcp = assert_json_command_with_env(
         &root,
@@ -323,12 +337,7 @@ fn resumed_version_and_init_emit_structured_json_when_requested() {
     let root = unique_temp_dir("resume-version-init-json");
     fs::create_dir_all(&root).expect("temp dir should exist");
 
-    let session_path = root.join("session.jsonl");
-    fs::write(
-        &session_path,
-        "{\"type\":\"session_meta\",\"version\":3,\"session_id\":\"resume-version-init-json\",\"created_at_ms\":0,\"updated_at_ms\":0}\n",
-    )
-    .expect("session should write");
+    let session_path = write_session_fixture(&root, "resume-version-init-json", None);
 
     let version = assert_json_command(
         &root,
@@ -402,6 +411,24 @@ fn write_upstream_fixture(root: &Path) -> PathBuf {
     )
     .expect("cli fixture should write");
     upstream
+}
+
+fn write_session_fixture(root: &Path, session_id: &str, user_text: Option<&str>) -> PathBuf {
+    let session_path = root.join("session.jsonl");
+    let mut session = Session::new()
+        .with_workspace_root(root.to_path_buf())
+        .with_persistence_path(session_path.clone());
+    session.session_id = session_id.to_string();
+    if let Some(text) = user_text {
+        session
+            .push_user_text(text)
+            .expect("session fixture message should persist");
+    } else {
+        session
+            .save_to_path(&session_path)
+            .expect("session fixture should persist");
+    }
+    session_path
 }
 
 fn write_agent(root: &Path, name: &str, description: &str, model: &str, reasoning: &str) {

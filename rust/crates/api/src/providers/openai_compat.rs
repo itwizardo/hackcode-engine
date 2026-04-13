@@ -60,7 +60,7 @@ impl OpenAiCompatConfig {
         }
     }
 
-    /// Alibaba DashScope compatible-mode endpoint (Qwen family models).
+    /// Alibaba `DashScope` compatible-mode endpoint (Qwen family models).
     /// Uses the OpenAI-compatible REST shape at /compatible-mode/v1.
     /// Requested via Discord #hackcode-get-help: native Alibaba API for
     /// higher rate limits than going through OpenRouter.
@@ -180,6 +180,35 @@ impl OpenAiCompatClient {
         let response = self.send_with_retry(&request).await?;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
+        // Some backends return {"error":{"message":"...","type":"...","code":...}}
+        // instead of a valid completion object. Check for this before attempting
+        // full deserialization so the user sees the actual error, not a cryptic
+        // "missing field 'id'" parse failure.
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(err_obj) = raw.get("error") {
+                let msg = err_obj
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("provider returned an error")
+                    .to_string();
+                let code = err_obj
+                    .get("code")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|c| c as u16);
+                return Err(ApiError::Api {
+                    status: reqwest::StatusCode::from_u16(code.unwrap_or(400))
+                        .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
+                    error_type: err_obj
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_owned),
+                    message: Some(msg),
+                    request_id,
+                    body,
+                    retryable: false,
+                });
+            }
+        }
         let payload = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|error| {
             ApiError::json_deserialize(self.config.provider_name, &request.model, &body, error)
         })?;
@@ -278,6 +307,19 @@ impl OpenAiCompatClient {
 static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Returns a random additive jitter in `[0, base]` to decorrelate retries
+/// Deserialize a JSON field as a `Vec<T>`, treating an explicit `null` value
+/// the same as a missing field (i.e. as an empty vector).
+/// Some OpenAI-compatible providers emit `"tool_calls": null` instead of
+/// omitting the field or using `[]`, which serde's `#[serde(default)]` alone
+/// does not tolerate — `default` only handles absent keys, not null values.
+fn deserialize_null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// from multiple concurrent clients. Entropy is drawn from the nanosecond
 /// wall clock mixed with a monotonic counter and run through a splitmix64
 /// finalizer; adequate for retry jitter (no cryptographic requirement).
@@ -696,7 +738,7 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     tool_calls: Vec<DeltaToolCall>,
 }
 
@@ -731,7 +773,7 @@ struct ErrorBody {
 }
 
 /// Returns true for models known to reject tuning parameters like temperature,
-/// top_p, frequency_penalty, and presence_penalty. These are typically
+/// `top_p`, `frequency_penalty`, and `presence_penalty`. These are typically
 /// reasoning/chain-of-thought models with fixed sampling.
 fn is_reasoning_model(model: &str) -> bool {
     let lowered = model.to_ascii_lowercase();
@@ -778,6 +820,14 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
     for message in &request.messages {
         messages.extend(translate_message(message));
     }
+    // Sanitize: drop any `role:"tool"` message that does not have a valid
+    // paired `role:"assistant"` with a `tool_calls` entry carrying the same
+    // `id` immediately before it (directly or as part of a run of tool
+    // results). OpenAI-compatible backends return 400 for orphaned tool
+    // messages regardless of how they were produced (compaction, session
+    // editing, resume, etc.). We drop rather than error so the request can
+    // still proceed with the remaining history intact.
+    messages = sanitize_tool_message_pairing(messages);
 
     // Strip routing prefix (e.g., "openai/gpt-4" → "gpt-4") for the wire.
     let wire_model = strip_routing_prefix(&request.model);
@@ -863,11 +913,16 @@ fn translate_message(message: &InputMessage) -> Vec<Value> {
             if text.is_empty() && tool_calls.is_empty() {
                 Vec::new()
             } else {
-                vec![json!({
+                let mut msg = serde_json::json!({
                     "role": "assistant",
                     "content": (!text.is_empty()).then_some(text),
-                    "tool_calls": tool_calls,
-                })]
+                });
+                // Only include tool_calls when non-empty: some providers reject
+                // assistant messages with an explicit empty tool_calls array.
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(tool_calls);
+                }
+                vec![msg]
             }
         }
         _ => message
@@ -894,6 +949,74 @@ fn translate_message(message: &InputMessage) -> Vec<Value> {
     }
 }
 
+/// Remove `role:"tool"` messages from `messages` that have no valid paired
+/// `role:"assistant"` message with a matching `tool_calls[].id` immediately
+/// preceding them. This is a last-resort safety net at the request-building
+/// layer — the compaction boundary fix (6e301c8) prevents the most common
+/// producer path, but resume, session editing, or future compaction variants
+/// could still create orphaned tool messages.
+///
+/// Algorithm: scan left-to-right. For each `role:"tool"` message, check the
+/// immediately preceding non-tool message. If it's `role:"assistant"` with a
+/// `tool_calls` array containing an entry whose `id` matches the tool
+/// message's `tool_call_id`, the pair is valid and both are kept. Otherwise
+/// the tool message is dropped.
+fn sanitize_tool_message_pairing(messages: Vec<Value>) -> Vec<Value> {
+    // Collect indices of tool messages that are orphaned.
+    let mut drop_indices = std::collections::HashSet::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.get("role").and_then(|v| v.as_str()) != Some("tool") {
+            continue;
+        }
+        let tool_call_id = msg
+            .get("tool_call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Find the nearest preceding non-tool message.
+        let preceding = messages[..i]
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) != Some("tool"));
+        // A tool message is considered paired when:
+        // (a) the nearest preceding non-tool message is an assistant message
+        //     whose `tool_calls` array contains an entry with the matching id, OR
+        // (b) there's no clear preceding context (e.g. the message comes right
+        //     after a user turn — this can happen with translated mixed-content
+        //     user messages). In case (b) we allow the message through rather
+        //     than silently dropping potentially valid history.
+        let preceding_role = preceding
+            .and_then(|m| m.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // Only apply sanitization when the preceding message is an assistant
+        // turn (the invariant is: assistant-with-tool_calls must precede tool).
+        // If the preceding is something else (user, system) don't drop — it
+        // may be a valid translation artifact or a path we don't understand.
+        if preceding_role != "assistant" {
+            continue;
+        }
+        let paired = preceding
+            .and_then(|m| m.get("tool_calls").and_then(|tc| tc.as_array()))
+            .is_some_and(|tool_calls| {
+                tool_calls
+                    .iter()
+                    .any(|tc| tc.get("id").and_then(|v| v.as_str()) == Some(tool_call_id))
+            });
+        if !paired {
+            drop_indices.insert(i);
+        }
+    }
+    if drop_indices.is_empty() {
+        return messages;
+    }
+    messages
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !drop_indices.contains(i))
+        .map(|(_, m)| m)
+        .collect()
+}
+
 fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String {
     content
         .iter()
@@ -907,7 +1030,7 @@ fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String {
 
 /// Recursively ensure every object-type node in a JSON Schema has
 /// `"properties"` (at least `{}`) and `"additionalProperties": false`.
-/// The OpenAI `/responses` endpoint validates schemas strictly and rejects
+/// The `OpenAI` `/responses` endpoint validates schemas strictly and rejects
 /// objects that omit these fields; `/chat/completions` is lenient but also
 /// accepts them, so we normalise unconditionally.
 fn normalize_object_schema(schema: &mut Value) {
@@ -1059,6 +1182,35 @@ fn parse_sse_frame(
     let payload = data_lines.join("\n");
     if payload == "[DONE]" {
         return Ok(None);
+    }
+    // Some backends embed an error object in a data: frame instead of using an
+    // HTTP error status. Surface the error message directly rather than letting
+    // ChatCompletionChunk deserialization fail with a cryptic 'missing field' error.
+    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&payload) {
+        if let Some(err_obj) = raw.get("error") {
+            let msg = err_obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("provider returned an error in stream")
+                .to_string();
+            let code = err_obj
+                .get("code")
+                .and_then(serde_json::Value::as_u64)
+                .map(|c| c as u16);
+            let status = reqwest::StatusCode::from_u16(code.unwrap_or(400))
+                .unwrap_or(reqwest::StatusCode::BAD_REQUEST);
+            return Err(ApiError::Api {
+                status,
+                error_type: err_obj
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_owned),
+                message: Some(msg),
+                request_id: None,
+                body: payload.clone(),
+                retryable: false,
+            });
+        }
     }
     serde_json::from_str::<ChatCompletionChunk>(&payload)
         .map(Some)
@@ -1505,6 +1657,147 @@ mod tests {
             payload.get("max_tokens").is_none(),
             "gpt-5.2 must not emit max_tokens"
         );
+    }
+
+    /// Regression test: some OpenAI-compatible providers emit `"tool_calls": null`
+    /// in stream delta chunks instead of omitting the field or using `[]`.
+    /// Before the fix this produced: `invalid type: null, expected a sequence`.
+    #[test]
+    fn delta_with_null_tool_calls_deserializes_as_empty_vec() {
+        use super::deserialize_null_as_empty_vec;
+
+        #[allow(dead_code)]
+        #[derive(serde::Deserialize, Debug)]
+        struct Delta {
+            content: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
+            tool_calls: Vec<super::DeltaToolCall>,
+        }
+
+        // Simulate the exact shape observed in the wild (gaebal-gajae repro 2026-04-09)
+        let json = r#"{
+            "content": "",
+            "function_call": null,
+            "refusal": null,
+            "role": "assistant",
+            "tool_calls": null
+        }"#;
+        let delta: Delta = serde_json::from_str(json)
+            .expect("delta with tool_calls:null must deserialize without error");
+        assert!(
+            delta.tool_calls.is_empty(),
+            "tool_calls:null must produce an empty vec, not an error"
+        );
+    }
+
+    /// Regression: when building a multi-turn request where a prior assistant
+    /// turn has no tool calls, the serialized assistant message must NOT include
+    /// `tool_calls: []`. Some providers reject requests that carry an empty
+    /// `tool_calls` array on assistant turns (gaebal-gajae repro 2026-04-09).
+    #[test]
+    fn assistant_message_without_tool_calls_omits_tool_calls_field() {
+        use crate::types::{InputContentBlock, InputMessage};
+
+        let request = MessageRequest {
+            model: "gpt-4o".to_string(),
+            max_tokens: 100,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![InputContentBlock::Text {
+                    text: "Hello".to_string(),
+                }],
+            }],
+            stream: false,
+            ..Default::default()
+        };
+        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let messages = payload["messages"].as_array().unwrap();
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message must be present");
+        assert!(
+            assistant_msg.get("tool_calls").is_none(),
+            "assistant message without tool calls must omit tool_calls field: {assistant_msg:?}"
+        );
+    }
+
+    /// Regression: assistant messages WITH tool calls must still include
+    /// the `tool_calls` array (normal multi-turn tool-use flow).
+    #[test]
+    fn assistant_message_with_tool_calls_includes_tool_calls_field() {
+        use crate::types::{InputContentBlock, InputMessage};
+
+        let request = MessageRequest {
+            model: "gpt-4o".to_string(),
+            max_tokens: 100,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![InputContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "/tmp/test"}),
+                }],
+            }],
+            stream: false,
+            ..Default::default()
+        };
+        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let messages = payload["messages"].as_array().unwrap();
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message must be present");
+        let tool_calls = assistant_msg
+            .get("tool_calls")
+            .expect("assistant message with tool calls must include tool_calls field");
+        assert!(tool_calls.is_array());
+        assert_eq!(tool_calls.as_array().unwrap().len(), 1);
+    }
+
+    /// Orphaned tool messages (no preceding assistant `tool_calls`) must be
+    /// dropped by the request-builder sanitizer. Regression for the second
+    /// layer of the tool-pairing invariant fix (gaebal-gajae 2026-04-10).
+    #[test]
+    fn sanitize_drops_orphaned_tool_messages() {
+        use super::sanitize_tool_message_pairing;
+
+        // Valid pair: assistant with tool_calls → tool result
+        let valid = vec![
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "result"}),
+        ];
+        let out = sanitize_tool_message_pairing(valid);
+        assert_eq!(out.len(), 2, "valid pair must be preserved");
+
+        // Orphaned tool message: no preceding assistant tool_calls
+        let orphaned = vec![
+            json!({"role": "assistant", "content": "hi"}),
+            json!({"role": "tool", "tool_call_id": "call_2", "content": "orphaned"}),
+        ];
+        let out = sanitize_tool_message_pairing(orphaned);
+        assert_eq!(out.len(), 1, "orphaned tool message must be dropped");
+        assert_eq!(out[0]["role"], json!("assistant"));
+
+        // Mismatched tool_call_id
+        let mismatched = vec![
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "call_3", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "call_WRONG", "content": "bad"}),
+        ];
+        let out = sanitize_tool_message_pairing(mismatched);
+        assert_eq!(out.len(), 1, "tool message with wrong id must be dropped");
+
+        // Two tool results both valid (same preceding assistant)
+        let two_results = vec![
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": "call_a", "type": "function", "function": {"name": "fa", "arguments": "{}"}},
+                {"id": "call_b", "type": "function", "function": {"name": "fb", "arguments": "{}"}}
+            ]}),
+            json!({"role": "tool", "tool_call_id": "call_a", "content": "ra"}),
+            json!({"role": "tool", "tool_call_id": "call_b", "content": "rb"}),
+        ];
+        let out = sanitize_tool_message_pairing(two_results);
+        assert_eq!(out.len(), 3, "both valid tool results must be preserved");
     }
 
     #[test]

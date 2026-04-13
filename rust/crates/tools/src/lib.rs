@@ -20,7 +20,7 @@ use runtime::{
     summary_compression::compress_summary_text,
     task_registry::TaskRegistry,
     team_cron_registry::{CronRegistry, TeamRegistry},
-    worker_boot::{WorkerReadySnapshot, WorkerRegistry},
+    worker_boot::{WorkerReadySnapshot, WorkerRegistry, WorkerTaskReceipt},
     write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, BashCommandOutput,
     BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage, ConversationRuntime,
     GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker, LaneEventName,
@@ -930,7 +930,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "worker_id": { "type": "string" },
-                    "prompt": { "type": "string" }
+                    "prompt": { "type": "string" },
+                    "task_receipt": {
+                        "type": "object",
+                        "properties": {
+                            "repo": { "type": "string" },
+                            "task_kind": { "type": "string" },
+                            "source_surface": { "type": "string" },
+                            "expected_artifacts": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            },
+                            "objective_preview": { "type": "string" }
+                        },
+                        "required": ["repo", "task_kind", "source_surface", "objective_preview"],
+                        "additionalProperties": false
+                    }
                 },
                 "required": ["worker_id"],
                 "additionalProperties": false
@@ -1207,8 +1222,11 @@ fn execute_tool_with_enforcer(
 ) -> Result<String, String> {
     match name {
         "bash" => {
-            maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<BashCommandInput>(input).and_then(run_bash)
+            // Parse input to get the command for permission classification
+            let bash_input: BashCommandInput = from_value(input)?;
+            let classified_mode = classify_bash_permission(&bash_input.command);
+            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+            run_bash(bash_input)
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -1246,7 +1264,13 @@ fn execute_tool_with_enforcer(
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
         "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
-        "PowerShell" => from_value::<PowerShellInput>(input).and_then(run_powershell),
+        "PowerShell" => {
+            // Parse input to get the command for permission classification
+            let ps_input: PowerShellInput = from_value(input)?;
+            let classified_mode = classify_powershell_permission(&ps_input.command);
+            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+            run_powershell(ps_input)
+        }
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
@@ -1300,6 +1324,28 @@ fn maybe_enforce_permission_check(
         enforce_permission_check(enforcer, tool_name, input)?;
     }
     Ok(())
+}
+
+/// Enforce permission check with a dynamically classified permission mode.
+/// Used for tools like bash and `PowerShell` where the required permission
+/// depends on the actual command being executed.
+fn maybe_enforce_permission_check_with_mode(
+    enforcer: Option<&PermissionEnforcer>,
+    tool_name: &str,
+    input: &Value,
+    required_mode: PermissionMode,
+) -> Result<(), String> {
+    if let Some(enforcer) = enforcer {
+        let input_str = serde_json::to_string(input).unwrap_or_default();
+        let result = enforcer.check_with_required_mode(tool_name, &input_str, required_mode);
+
+        match result {
+            EnforcementResult::Allowed => Ok(()),
+            EnforcementResult::Denied { reason, .. } => Err(reason),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1516,7 +1562,11 @@ fn run_worker_await_ready(input: WorkerIdInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_worker_send_prompt(input: WorkerSendPromptInput) -> Result<String, String> {
-    let worker = global_worker_registry().send_prompt(&input.worker_id, input.prompt.as_deref())?;
+    let worker = global_worker_registry().send_prompt(
+        &input.worker_id,
+        input.prompt.as_deref(),
+        input.task_receipt,
+    )?;
     to_pretty_json(worker)
 }
 
@@ -1813,6 +1863,73 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
 
+/// Classify bash command permission based on command type and path.
+/// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
+/// all others remain `DangerFullAccess`.
+fn classify_bash_permission(command: &str) -> PermissionMode {
+    // Read-only commands that are safe when targeting workspace paths
+    const READ_ONLY_COMMANDS: &[&str] = &[
+        "cat", "head", "tail", "less", "more", "ls", "ll", "dir", "find", "test", "[", "[[",
+        "grep", "rg", "awk", "sed", "file", "stat", "readlink", "wc", "sort", "uniq", "cut", "tr",
+        "pwd", "echo", "printf",
+    ];
+
+    // Get the base command (first word before any args or pipes)
+    let base_cmd = command.split_whitespace().next().unwrap_or("");
+    let base_cmd = base_cmd.split('|').next().unwrap_or("").trim();
+    let base_cmd = base_cmd.split(';').next().unwrap_or("").trim();
+    let base_cmd = base_cmd.split('>').next().unwrap_or("").trim();
+    let base_cmd = base_cmd.split('<').next().unwrap_or("").trim();
+
+    // Check if it's a read-only command
+    let cmd_name = base_cmd.split('/').next_back().unwrap_or(base_cmd);
+    let is_read_only = READ_ONLY_COMMANDS.contains(&cmd_name);
+
+    if !is_read_only {
+        return PermissionMode::DangerFullAccess;
+    }
+
+    // Check if any path argument is outside workspace
+    // Simple heuristic: check for absolute paths not starting with CWD
+    if has_dangerous_paths(command) {
+        return PermissionMode::DangerFullAccess;
+    }
+
+    PermissionMode::WorkspaceWrite
+}
+
+/// Check if command has dangerous paths (outside workspace).
+fn has_dangerous_paths(command: &str) -> bool {
+    // Look for absolute paths
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+
+    for token in tokens {
+        // Skip flags/options
+        if token.starts_with('-') {
+            continue;
+        }
+
+        // Check for absolute paths
+        if token.starts_with('/') || token.starts_with("~/") {
+            // Check if it's within CWD
+            let path =
+                PathBuf::from(token.replace('~', &std::env::var("HOME").unwrap_or_default()));
+            if let Ok(cwd) = std::env::current_dir() {
+                if !path.starts_with(&cwd) {
+                    return true; // Path outside workspace
+                }
+            }
+        }
+
+        // Check for parent directory traversal that escapes workspace
+        if token.contains("../..") || token.starts_with("../") && !token.starts_with("./") {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn run_bash(input: BashCommandInput) -> Result<String, String> {
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
         return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
@@ -2058,6 +2175,78 @@ fn run_repl(input: ReplInput) -> Result<String, String> {
     to_pretty_json(execute_repl(input)?)
 }
 
+/// Classify `PowerShell` command permission based on command type and path.
+/// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
+/// all others remain `DangerFullAccess`.
+fn classify_powershell_permission(command: &str) -> PermissionMode {
+    // Read-only commands that are safe when targeting workspace paths
+    const READ_ONLY_COMMANDS: &[&str] = &[
+        "Get-Content",
+        "Get-ChildItem",
+        "Test-Path",
+        "Get-Item",
+        "Get-ItemProperty",
+        "Get-FileHash",
+        "Select-String",
+    ];
+
+    // Check if command starts with a read-only cmdlet
+    let cmd_lower = command.trim().to_lowercase();
+    let is_read_only_cmd = READ_ONLY_COMMANDS
+        .iter()
+        .any(|cmd| cmd_lower.starts_with(&cmd.to_lowercase()));
+
+    if !is_read_only_cmd {
+        return PermissionMode::DangerFullAccess;
+    }
+
+    // Check if the path is within workspace (CWD or subdirectory)
+    // Extract path from command - look for -Path or positional parameter
+    let path = extract_powershell_path(command);
+    match path {
+        Some(p) if is_within_workspace(&p) => PermissionMode::WorkspaceWrite,
+        _ => PermissionMode::DangerFullAccess,
+    }
+}
+
+/// Extract the path argument from a `PowerShell` command.
+fn extract_powershell_path(command: &str) -> Option<String> {
+    // Look for -Path parameter
+    if let Some(idx) = command.to_lowercase().find("-path") {
+        let after_path = &command[idx + 5..];
+        let path = after_path.split_whitespace().next()?;
+        return Some(path.trim_matches('"').trim_matches('\'').to_string());
+    }
+
+    // Look for positional path parameter (after command name)
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.len() >= 2 {
+        // Skip the cmdlet name and take the first argument
+        let first_arg = parts[1];
+        // Check if it looks like a path (contains \, /, or .)
+        if first_arg.contains(['\\', '/', '.']) {
+            return Some(first_arg.trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+
+    None
+}
+
+/// Check if a path is within the current workspace.
+fn is_within_workspace(path: &str) -> bool {
+    let path = PathBuf::from(path);
+
+    // If path is absolute, check if it starts with CWD
+    if path.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            return path.starts_with(&cwd);
+        }
+    }
+
+    // Relative paths are assumed to be within workspace
+    !path.starts_with("/") && !path.starts_with("\\") && !path.starts_with("..")
+}
+
 fn run_powershell(input: PowerShellInput) -> Result<String, String> {
     to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
 }
@@ -2294,6 +2483,8 @@ struct WorkerSendPromptInput {
     worker_id: String,
     #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    task_receipt: Option<WorkerTaskReceipt>,
 }
 
 const fn default_auto_recover_prompt_misdelivery() -> bool {
@@ -3091,7 +3282,7 @@ fn skill_lookup_roots() -> Vec<SkillLookupRoot> {
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         push_prefixed_skill_lookup_roots(&mut roots, std::path::Path::new(&codex_home));
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
         push_home_skill_lookup_roots(&mut roots, std::path::Path::new(&home));
     }
     if let Ok(claude_config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
@@ -3598,12 +3789,14 @@ fn persist_agent_terminal_state(
             .push(LaneEvent::failed(iso8601_now(), &blocker));
     } else {
         next_manifest.current_blocker = None;
-        let compressed_detail = result
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| compress_summary_text(value.trim()));
-        next_manifest
-            .lane_events
-            .push(LaneEvent::finished(iso8601_now(), compressed_detail));
+        let mut finished_summary = build_lane_finished_summary(&next_manifest, result);
+        finished_summary.data.disabled_cron_ids = disable_matching_crons(&next_manifest, result);
+        next_manifest.lane_events.push(
+            LaneEvent::finished(iso8601_now(), finished_summary.detail).with_data(
+                serde_json::to_value(&finished_summary.data)
+                    .expect("lane summary metadata should serialize"),
+            ),
+        );
         if let Some(provenance) = maybe_commit_provenance(result) {
             next_manifest.lane_events.push(LaneEvent::commit_created(
                 iso8601_now(),
@@ -3613,6 +3806,566 @@ fn persist_agent_terminal_state(
         }
     }
     write_agent_manifest(&next_manifest)
+}
+
+const MIN_LANE_SUMMARY_WORDS: usize = 7;
+const REVIEW_VERDICTS: &[(&str, &str)] = &[
+    ("APPROVE", "approve"),
+    ("REJECT", "reject"),
+    ("BLOCKED", "blocked"),
+];
+const CONTROL_ONLY_SUMMARY_WORDS: &[&str] = &[
+    "ack",
+    "commit",
+    "continue",
+    "everyting",
+    "everything",
+    "keep",
+    "next",
+    "push",
+    "ralph",
+    "resume",
+    "retry",
+    "run",
+    "stop",
+    "sweep",
+    "sweeping",
+    "team",
+];
+const CONTEXTUAL_SUMMARY_WORDS: &[&str] = &[
+    "added",
+    "audited",
+    "blocked",
+    "completed",
+    "documented",
+    "failed",
+    "finished",
+    "fixed",
+    "implemented",
+    "investigated",
+    "merged",
+    "pushed",
+    "refactored",
+    "removed",
+    "reviewed",
+    "tested",
+    "updated",
+    "verified",
+];
+
+#[derive(Debug, Clone, Serialize)]
+struct LaneFinishedSummaryData {
+    #[serde(rename = "qualityFloorApplied")]
+    quality_floor_applied: bool,
+    reasons: Vec<String>,
+    #[serde(rename = "rawSummary", skip_serializing_if = "Option::is_none")]
+    raw_summary: Option<String>,
+    #[serde(rename = "wordCount")]
+    word_count: usize,
+    #[serde(rename = "reviewVerdict", skip_serializing_if = "Option::is_none")]
+    review_verdict: Option<String>,
+    #[serde(rename = "reviewTarget", skip_serializing_if = "Option::is_none")]
+    review_target: Option<String>,
+    #[serde(rename = "reviewRationale", skip_serializing_if = "Option::is_none")]
+    review_rationale: Option<String>,
+    #[serde(rename = "selectionOutcome", skip_serializing_if = "Option::is_none")]
+    selection_outcome: Option<SelectionOutcome>,
+    #[serde(rename = "recoveryOutcome", skip_serializing_if = "Option::is_none")]
+    recovery_outcome: Option<RecoveryOutcome>,
+    #[serde(rename = "artifactProvenance", skip_serializing_if = "Option::is_none")]
+    artifact_provenance: Option<ArtifactProvenance>,
+    #[serde(rename = "disabledCronIds", skip_serializing_if = "Vec::is_empty")]
+    disabled_cron_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LaneFinishedSummary {
+    detail: Option<String>,
+    data: LaneFinishedSummaryData,
+}
+
+#[derive(Debug)]
+struct LaneSummaryAssessment {
+    apply_quality_floor: bool,
+    reasons: Vec<String>,
+    word_count: usize,
+    review_outcome: Option<ReviewLaneOutcome>,
+    recovery_outcome: Option<RecoveryOutcome>,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewLaneOutcome {
+    verdict: String,
+    rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SelectionOutcome {
+    #[serde(rename = "chosenItems", skip_serializing_if = "Vec::is_empty")]
+    chosen_items: Vec<String>,
+    #[serde(rename = "skippedItems", skip_serializing_if = "Vec::is_empty")]
+    skipped_items: Vec<String>,
+    action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecoveryOutcome {
+    cause: String,
+    #[serde(rename = "targetLane", skip_serializing_if = "Option::is_none")]
+    target_lane: Option<String>,
+    #[serde(rename = "preservedState", skip_serializing_if = "Option::is_none")]
+    preserved_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ArtifactProvenance {
+    #[serde(rename = "sourceLanes", skip_serializing_if = "Vec::is_empty")]
+    source_lanes: Vec<String>,
+    #[serde(rename = "roadmapIds", skip_serializing_if = "Vec::is_empty")]
+    roadmap_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<String>,
+    #[serde(rename = "diffStat", skip_serializing_if = "Option::is_none")]
+    diff_stat: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    verification: Vec<String>,
+    #[serde(rename = "commitSha", skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<String>,
+}
+
+fn build_lane_finished_summary(
+    manifest: &AgentOutput,
+    result: Option<&str>,
+) -> LaneFinishedSummary {
+    let raw_summary = result.map(str::trim).filter(|value| !value.is_empty());
+    let assessment = assess_lane_summary_quality(raw_summary.unwrap_or_default());
+    let detail = match raw_summary {
+        Some(summary) if !assessment.apply_quality_floor => Some(compress_summary_text(summary)),
+        Some(summary) => Some(compose_lane_summary_fallback(
+            manifest,
+            Some(summary),
+            assessment.recovery_outcome.as_ref(),
+        )),
+        None => Some(compose_lane_summary_fallback(manifest, None, None)),
+    };
+    let review_outcome = assessment.review_outcome.clone();
+    let recovery_outcome = assessment.recovery_outcome.clone();
+    let review_target = review_outcome
+        .as_ref()
+        .map(|_| manifest.description.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let artifact_provenance = extract_artifact_provenance(manifest, raw_summary);
+
+    LaneFinishedSummary {
+        detail,
+        data: LaneFinishedSummaryData {
+            quality_floor_applied: raw_summary.is_none() || assessment.apply_quality_floor,
+            reasons: assessment.reasons,
+            raw_summary: raw_summary.map(str::to_string),
+            word_count: assessment.word_count,
+            review_verdict: review_outcome
+                .as_ref()
+                .map(|outcome| outcome.verdict.clone()),
+            review_target,
+            review_rationale: review_outcome.and_then(|outcome| outcome.rationale),
+            selection_outcome: extract_selection_outcome(raw_summary.unwrap_or_default()),
+            recovery_outcome,
+            artifact_provenance,
+            disabled_cron_ids: Vec::new(),
+        },
+    }
+}
+
+fn assess_lane_summary_quality(summary: &str) -> LaneSummaryAssessment {
+    let words = summary
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '#'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+
+    let word_count = words.len();
+    let mut reasons = Vec::new();
+    if summary.trim().is_empty() {
+        reasons.push(String::from("empty"));
+    }
+
+    let review_outcome = extract_review_outcome(summary);
+    let recovery_outcome = extract_recovery_outcome(summary);
+    if recovery_outcome.is_some() {
+        reasons.push(String::from("recovery_control_prose"));
+    }
+
+    let control_only = !words.is_empty()
+        && words
+            .iter()
+            .all(|word| CONTROL_ONLY_SUMMARY_WORDS.contains(&word.as_str()));
+    if control_only && review_outcome.is_none() {
+        reasons.push(String::from("control_only"));
+    }
+
+    let has_context_signal = summary.contains('`')
+        || summary.contains('/')
+        || summary.contains(':')
+        || summary.contains('#')
+        || review_outcome.is_some()
+        || words
+            .iter()
+            .any(|word| CONTEXTUAL_SUMMARY_WORDS.contains(&word.as_str()));
+    if word_count < MIN_LANE_SUMMARY_WORDS && !has_context_signal {
+        reasons.push(String::from("too_short_without_context"));
+    }
+
+    LaneSummaryAssessment {
+        apply_quality_floor: !reasons.is_empty(),
+        reasons,
+        word_count,
+        review_outcome,
+        recovery_outcome,
+    }
+}
+
+fn compose_lane_summary_fallback(
+    manifest: &AgentOutput,
+    raw_summary: Option<&str>,
+    recovery_outcome: Option<&RecoveryOutcome>,
+) -> String {
+    let target = manifest.description.trim();
+    let base = format!(
+        "Completed lane `{}` for target: {}. Status: completed.",
+        manifest.name,
+        if target.is_empty() {
+            "unspecified task"
+        } else {
+            target
+        }
+    );
+    if let Some(outcome) = recovery_outcome {
+        let mut detail = format!(
+            "{base} Recovery handoff observed via tmux reinjection (cause: `{}`).",
+            outcome.cause
+        );
+        if let Some(target_lane) = &outcome.target_lane {
+            let _ = std::fmt::Write::write_fmt(
+                &mut detail,
+                format_args!(" Target lane: `{target_lane}`."),
+            );
+        }
+        if let Some(preserved_state) = &outcome.preserved_state {
+            let _ = std::fmt::Write::write_fmt(
+                &mut detail,
+                format_args!(" Preserved state: {preserved_state}."),
+            );
+        }
+        return detail;
+    }
+    match raw_summary {
+        Some(summary) => format!(
+            "{base} Original stop summary was too vague to keep as the lane result: \"{}\".",
+            summary.trim()
+        ),
+        None => format!("{base} No usable stop summary was produced by the lane."),
+    }
+}
+
+fn extract_review_outcome(summary: &str) -> Option<ReviewLaneOutcome> {
+    let mut lines = summary
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next()?;
+    let verdict = REVIEW_VERDICTS.iter().find_map(|(prefix, verdict)| {
+        first
+            .eq_ignore_ascii_case(prefix)
+            .then(|| (*verdict).to_string())
+    })?;
+    let rationale = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+    Some(ReviewLaneOutcome {
+        verdict,
+        rationale: (!rationale.is_empty()).then_some(compress_summary_text(&rationale)),
+    })
+}
+
+fn extract_selection_outcome(summary: &str) -> Option<SelectionOutcome> {
+    let mut chosen_items = Vec::new();
+    let mut skipped_items = Vec::new();
+    let mut action = None;
+    let mut rationale = None;
+
+    for line in summary
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let lowered = line.to_ascii_lowercase();
+        let roadmap_items = extract_roadmap_items(line);
+
+        if lowered.starts_with("chosen:")
+            || lowered.starts_with("picked:")
+            || lowered.starts_with("selected:")
+            || (lowered.contains("picked") && !roadmap_items.is_empty())
+            || (lowered.contains("selected") && !roadmap_items.is_empty())
+        {
+            chosen_items.extend(roadmap_items);
+        } else if lowered.starts_with("skipped:")
+            || lowered.starts_with("skip:")
+            || (lowered.contains("skipped") && !roadmap_items.is_empty())
+        {
+            skipped_items.extend(roadmap_items);
+        }
+
+        if let Some(rest) = lowered.strip_prefix("action:") {
+            if rest.contains("execute") || rest.contains("implement") || rest.contains("fix") {
+                action = Some(String::from("execute"));
+            } else if rest.contains("review") || rest.contains("audit") {
+                action = Some(String::from("review"));
+            } else if rest.contains("no-op") || rest.contains("noop") {
+                action = Some(String::from("no-op"));
+            }
+        }
+
+        if let Some(rest) = line.strip_prefix("Rationale:") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                rationale = Some(compress_summary_text(trimmed));
+            }
+        }
+    }
+
+    chosen_items.sort();
+    chosen_items.dedup();
+    skipped_items.sort();
+    skipped_items.dedup();
+
+    if chosen_items.is_empty() && skipped_items.is_empty() && action.is_none() {
+        return None;
+    }
+
+    let default_action = if chosen_items.is_empty() {
+        String::from("no-op")
+    } else {
+        String::from("execute")
+    };
+
+    Some(SelectionOutcome {
+        chosen_items,
+        skipped_items,
+        action: action.unwrap_or(default_action),
+        rationale,
+    })
+}
+
+fn extract_recovery_outcome(summary: &str) -> Option<RecoveryOutcome> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let has_tmux_inject_marker = lowered.contains("omx_tmux_inject");
+    let has_recovery_phrase = lowered.contains("continue from current mode state")
+        || (lowered.starts_with("team ") && lowered.contains(" next:"));
+    if !has_tmux_inject_marker && !has_recovery_phrase {
+        return None;
+    }
+
+    let cause = if lowered.contains("current mode state") {
+        "resume_after_stop"
+    } else if lowered.contains("tool failure") {
+        "retry_after_tool_failure"
+    } else if lowered.contains("worker panes stalled")
+        || lowered.contains("no progress")
+        || lowered.contains("leader stale")
+        || lowered.contains("all workers idle")
+        || lowered.contains("all 1 worker idle")
+        || lowered.contains("pane(s) active")
+    {
+        "tmux_reinject_after_idle"
+    } else {
+        "manual_recovery"
+    };
+
+    let target_lane = trimmed.lines().map(str::trim).find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("team ") {
+            return None;
+        }
+        line[5..]
+            .split_once(':')
+            .map(|(name, _)| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    });
+
+    let preserved_state = lowered
+        .contains("current mode state")
+        .then(|| String::from("current mode state"));
+
+    Some(RecoveryOutcome {
+        cause: cause.to_string(),
+        target_lane,
+        preserved_state,
+    })
+}
+
+fn extract_roadmap_items(line: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            let mut digits = String::new();
+            while let Some(next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    digits.push(*next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !digits.is_empty() {
+                items.push(format!("ROADMAP #{digits}"));
+            }
+        }
+    }
+    items
+}
+
+fn extract_artifact_provenance(
+    manifest: &AgentOutput,
+    raw_summary: Option<&str>,
+) -> Option<ArtifactProvenance> {
+    let summary = raw_summary?;
+    let mut roadmap_ids = extract_roadmap_items(summary);
+    roadmap_ids.extend(extract_roadmap_items(&manifest.description));
+    roadmap_ids.sort();
+    roadmap_ids.dedup();
+
+    let mut files = extract_file_paths(summary);
+    files.sort();
+    files.dedup();
+
+    let mut verification = Vec::new();
+    let lowered = summary.to_ascii_lowercase();
+    for (needle, label) in [
+        ("tested", "tested"),
+        ("committed", "committed"),
+        ("pushed", "pushed"),
+        ("merged", "merged"),
+    ] {
+        if lowered.contains(needle) {
+            verification.push(label.to_string());
+        }
+    }
+
+    let commit_sha = extract_commit_sha(summary);
+    let diff_stat = extract_diff_stat(summary);
+    let source_lanes = vec![manifest.name.clone()];
+
+    if roadmap_ids.is_empty()
+        && files.is_empty()
+        && verification.is_empty()
+        && commit_sha.is_none()
+        && diff_stat.is_none()
+    {
+        return None;
+    }
+
+    Some(ArtifactProvenance {
+        source_lanes,
+        roadmap_ids,
+        files,
+        diff_stat,
+        verification,
+        commit_sha,
+    })
+}
+
+fn extract_file_paths(summary: &str) -> Vec<String> {
+    summary
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']'))
+        .map(|token| {
+            token
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_end_matches('.')
+        })
+        .filter(|token| {
+            token.contains('.')
+                && !token.starts_with("http")
+                && !token
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '+' || ch == '-')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn extract_diff_stat(summary: &str) -> Option<String> {
+    summary
+        .split('\n')
+        .map(str::trim)
+        .find_map(|line| {
+            line.find("Diff stat:")
+                .map(|index| normalize_diff_stat(&line[(index + "Diff stat:".len())..]))
+                .or_else(|| {
+                    line.find("Diff:")
+                        .map(|index| normalize_diff_stat(&line[(index + "Diff:".len())..]))
+                })
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_diff_stat(value: &str) -> String {
+    let trimmed = value.trim();
+    for marker in [" Tested", " Committed", " committed", " pushed", " merged"] {
+        if let Some((prefix, _)) = trimmed.split_once(marker) {
+            return prefix.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn disable_matching_crons(manifest: &AgentOutput, result: Option<&str>) -> Vec<String> {
+    let tokens = cron_match_tokens(manifest, result);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut disabled = Vec::new();
+    for entry in global_cron_registry().list(true) {
+        let haystack = format!(
+            "{} {}",
+            entry.prompt,
+            entry.description.as_deref().unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        if tokens.iter().any(|token| haystack.contains(token))
+            && global_cron_registry().disable(&entry.cron_id).is_ok()
+        {
+            disabled.push(entry.cron_id);
+        }
+    }
+    disabled.sort();
+    disabled
+}
+
+fn cron_match_tokens(manifest: &AgentOutput, result: Option<&str>) -> Vec<String> {
+    let mut tokens = extract_roadmap_items(manifest.description.as_str())
+        .into_iter()
+        .chain(extract_roadmap_items(result.unwrap_or_default()))
+        .map(|item| item.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() && !manifest.name.trim().is_empty() {
+        tokens.push(manifest.name.trim().to_ascii_lowercase());
+    }
+
+    tokens.sort();
+    tokens.dedup();
+    tokens
 }
 
 fn derive_agent_state(
@@ -3759,6 +4512,8 @@ fn classify_lane_failure(error: &str) -> LaneFailureClass {
         || normalized.contains("tool runtime")
     {
         LaneFailureClass::ToolRuntime
+    } else if normalized.contains("workspace") && normalized.contains("mismatch") {
+        LaneFailureClass::WorkspaceMismatch
     } else if normalized.contains("plugin") {
         LaneFailureClass::PluginStartup
     } else if normalized.contains("mcp") && normalized.contains("handshake") {
@@ -3794,10 +4549,7 @@ impl ProviderRuntimeClient {
         allowed_tools: BTreeSet<String>,
         fallback_config: &ProviderFallbackConfig,
     ) -> Result<Self, String> {
-        let primary_model = fallback_config
-            .primary()
-            .map(str::to_string)
-            .unwrap_or(model);
+        let primary_model = fallback_config.primary().map_or(model, str::to_string);
         let primary = build_provider_entry(&primary_model)?;
         let mut chain = vec![primary];
         for fallback_model in fallback_config.fallbacks() {
@@ -3875,17 +4627,15 @@ impl ApiClient for ProviderRuntimeClient {
                         entry.model
                     );
                     last_error = Some(error);
-                    continue;
                 }
                 Err(error) => return Err(RuntimeError::new(error.to_string())),
             }
         }
 
-        Err(RuntimeError::new(
-            last_error
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| String::from("provider chain exhausted with no attempts")),
-        ))
+        Err(RuntimeError::new(last_error.map_or_else(
+            || String::from("provider chain exhausted with no attempts"),
+            |error| error.to_string(),
+        )))
     }
 }
 
@@ -5395,11 +6145,11 @@ mod tests {
 
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, classify_lane_failure,
-        derive_agent_state, execute_agent_with_spawn, execute_tool, final_assistant_text,
-        maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
-        persist_agent_terminal_state, push_output_block, run_task_packet, AgentInput, AgentJob,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, ProviderRuntimeClient,
-        SubagentToolExecutor,
+        derive_agent_state, execute_agent_with_spawn, execute_tool, extract_recovery_outcome,
+        final_assistant_text, global_cron_registry, maybe_commit_provenance, mvp_tool_specs,
+        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
+        run_task_packet, AgentInput, AgentJob, GlobalToolRegistry, LaneEventName, LaneFailureClass,
+        ProviderRuntimeClient, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::ProviderFallbackConfig;
@@ -5412,6 +6162,24 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn env_guard_recovers_after_poisoning() {
+        let poisoned = std::thread::spawn(|| {
+            let _guard = env_guard();
+            panic!("poison env lock");
+        })
+        .join();
+        assert!(poisoned.is_err(), "poisoning thread should panic");
+
+        let _guard = env_guard();
     }
 
     fn temp_path(name: &str) -> PathBuf {
@@ -6534,7 +7302,7 @@ mod tests {
 
     #[test]
     fn skill_loads_local_skill_prompt() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let home = temp_path("skills-home");
         let skill_dir = home.join(".agents").join("skills").join("help");
         fs::create_dir_all(&skill_dir).expect("skill dir should exist");
@@ -6591,7 +7359,7 @@ mod tests {
 
     #[test]
     fn skill_resolves_project_local_skills_and_legacy_commands() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("project-skills");
         let skill_dir = root.join(".hackcode").join("skills").join("plan");
         let command_dir = root.join(".hackcode").join("commands");
@@ -6635,7 +7403,7 @@ mod tests {
 
     #[test]
     fn skill_loads_project_local_claude_skill_prompt() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("project-skills");
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -6686,7 +7454,7 @@ mod tests {
 
     #[test]
     fn skill_loads_project_local_omc_and_agents_skill_prompts() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("project-omc-skills");
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -6756,7 +7524,7 @@ mod tests {
 
     #[test]
     fn skill_loads_learned_skill_from_claude_config_dir() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("claude-config-learned-skill");
         let home = root.join("home");
         let claude_config_dir = root.join("claude-config");
@@ -6811,7 +7579,7 @@ mod tests {
 
     #[test]
     fn skill_loads_direct_skill_and_legacy_command_from_claude_config_dir() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("claude-config-direct-skill");
         let home = root.join("home");
         let claude_config_dir = root.join("claude-config");
@@ -6883,7 +7651,7 @@ mod tests {
 
     #[test]
     fn skill_loads_project_local_legacy_command_markdown() {
-        let _guard = env_lock().lock().expect("env lock should acquire");
+        let _guard = env_guard();
         let root = temp_path("project-legacy-command");
         let home = root.join("home");
         let workspace = root.join("workspace");
@@ -7092,6 +7860,14 @@ mod tests {
             "lane.finished"
         );
         assert_eq!(
+            completed_manifest_json["laneEvents"][1]["data"]["qualityFloorApplied"],
+            false
+        );
+        assert_eq!(
+            completed_manifest_json["laneEvents"][1]["detail"],
+            "Finished successfully in commit abc1234"
+        );
+        assert_eq!(
             completed_manifest_json["laneEvents"][2]["event"],
             "lane.commit.created"
         );
@@ -7151,6 +7927,296 @@ mod tests {
             "tool_runtime"
         );
         assert_eq!(failed_manifest_json["derivedState"], "truly_idle");
+
+        let normalized = execute_agent_with_spawn(
+            AgentInput {
+                description: "Sweep the next backlog item".to_string(),
+                prompt: "Produce a low-signal stop summary".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("summary-floor".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some("commit push everyting, keep sweeping $ralph"),
+                    None,
+                )
+            },
+        )
+        .expect("normalized agent should succeed");
+
+        let normalized_manifest = std::fs::read_to_string(&normalized.manifest_file)
+            .expect("normalized manifest should exist");
+        let normalized_manifest_json: serde_json::Value =
+            serde_json::from_str(&normalized_manifest).expect("normalized manifest json");
+        assert_eq!(
+            normalized_manifest_json["laneEvents"][1]["event"],
+            "lane.finished"
+        );
+        let normalized_detail = normalized_manifest_json["laneEvents"][1]["detail"]
+            .as_str()
+            .expect("normalized detail");
+        assert!(normalized_detail.contains("Completed lane `summary-floor`"));
+        assert!(normalized_detail.contains("Sweep the next backlog item"));
+        assert_eq!(
+            normalized_manifest_json["laneEvents"][1]["data"]["qualityFloorApplied"],
+            true
+        );
+        assert_eq!(
+            normalized_manifest_json["laneEvents"][1]["data"]["rawSummary"],
+            "commit push everyting, keep sweeping $ralph"
+        );
+        assert_eq!(
+            normalized_manifest_json["laneEvents"][1]["data"]["reasons"][0],
+            "control_only"
+        );
+
+        let recovery = execute_agent_with_spawn(
+            AgentInput {
+                description: "Recover the stalled audit lane".to_string(),
+                prompt: "Normalize OMX reinjection control prose".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("recovery-lane".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some(
+                        "Team read-only-audit-only-for-roadm: worker panes stalled, no progress 2m30s. Next: omx team status read-only-audit-only-for-roadm; read worker messages; unblock/reassign or shutdown. [OMX_TMUX_INJECT]",
+                    ),
+                    None,
+                )
+            },
+        )
+        .expect("recovery agent should succeed");
+
+        let recovery_manifest = std::fs::read_to_string(&recovery.manifest_file)
+            .expect("recovery manifest should exist");
+        let recovery_manifest_json: serde_json::Value =
+            serde_json::from_str(&recovery_manifest).expect("recovery manifest json");
+        let recovery_detail = recovery_manifest_json["laneEvents"][1]["detail"]
+            .as_str()
+            .expect("recovery detail");
+        assert!(recovery_detail.contains("Recovery handoff observed via tmux reinjection"));
+        assert!(recovery_detail.contains("read-only-audit-only-for-roadm"));
+        assert!(!recovery_detail.contains("OMX_TMUX_INJECT"));
+        assert_eq!(
+            recovery_manifest_json["laneEvents"][1]["data"]["recoveryOutcome"]["cause"],
+            "tmux_reinject_after_idle"
+        );
+        assert_eq!(
+            recovery_manifest_json["laneEvents"][1]["data"]["recoveryOutcome"]["targetLane"],
+            "read-only-audit-only-for-roadm"
+        );
+        assert_eq!(
+            recovery_manifest_json["laneEvents"][1]["data"]["qualityFloorApplied"],
+            true
+        );
+        assert_eq!(
+            recovery_manifest_json["laneEvents"][1]["data"]["reasons"][0],
+            "recovery_control_prose"
+        );
+
+        let review = execute_agent_with_spawn(
+            AgentInput {
+                description: "Review commit 1234abcd for ROADMAP #67".to_string(),
+                prompt: "Review the scoped diff".to_string(),
+                subagent_type: Some("Verification".to_string()),
+                name: Some("review-lane".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some("APPROVE\n\nTarget: commit 1234abcd\nRationale: scoped diff is safe."),
+                    None,
+                )
+            },
+        )
+        .expect("review agent should succeed");
+
+        let review_manifest =
+            std::fs::read_to_string(&review.manifest_file).expect("review manifest should exist");
+        let review_manifest_json: serde_json::Value =
+            serde_json::from_str(&review_manifest).expect("review manifest json");
+        assert_eq!(
+            review_manifest_json["laneEvents"][1]["data"]["reviewVerdict"],
+            "approve"
+        );
+        assert_eq!(
+            review_manifest_json["laneEvents"][1]["data"]["reviewTarget"],
+            "Review commit 1234abcd for ROADMAP #67"
+        );
+        assert_eq!(
+            review_manifest_json["laneEvents"][1]["data"]["reviewRationale"],
+            "Target: commit 1234abcd Rationale: scoped diff is safe."
+        );
+        assert_eq!(
+            review_manifest_json["laneEvents"][1]["data"]["qualityFloorApplied"],
+            false
+        );
+
+        let selection = execute_agent_with_spawn(
+            AgentInput {
+                description: "Scan ROADMAP Immediate Backlog for the next repo-local item".to_string(),
+                prompt: "Choose the next backlog target".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("backlog-scan".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some(
+                        "Selected next backlog target.\nChosen: ROADMAP #65\nSkipped: ROADMAP #63, ROADMAP #64\nAction: execute\nRationale: #65 is the next repo-local lane-finished metadata task.",
+                    ),
+                    None,
+                )
+            },
+        )
+        .expect("selection agent should succeed");
+
+        let selection_manifest = std::fs::read_to_string(&selection.manifest_file)
+            .expect("selection manifest should exist");
+        let selection_manifest_json: serde_json::Value =
+            serde_json::from_str(&selection_manifest).expect("selection manifest json");
+        assert_eq!(
+            selection_manifest_json["laneEvents"][1]["data"]["selectionOutcome"]["chosenItems"][0],
+            "ROADMAP #65"
+        );
+        assert_eq!(
+            selection_manifest_json["laneEvents"][1]["data"]["selectionOutcome"]["skippedItems"][0],
+            "ROADMAP #63"
+        );
+        assert_eq!(
+            selection_manifest_json["laneEvents"][1]["data"]["selectionOutcome"]["skippedItems"][1],
+            "ROADMAP #64"
+        );
+        assert_eq!(
+            selection_manifest_json["laneEvents"][1]["data"]["selectionOutcome"]["action"],
+            "execute"
+        );
+        assert_eq!(
+            selection_manifest_json["laneEvents"][1]["data"]["selectionOutcome"]["rationale"],
+            "#65 is the next repo-local lane-finished metadata task."
+        );
+
+        let artifact = execute_agent_with_spawn(
+            AgentInput {
+                description: "Land ROADMAP #64 provenance hardening".to_string(),
+                prompt: "Ship structured artifact provenance".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("artifact-lane".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some(
+                        "Completed ROADMAP #64. Files: rust/crates/tools/src/lib.rs ROADMAP.md. Diff stat: 2 files, +12/-1. Tested, committed, pushed as commit deadbee.",
+                    ),
+                    None,
+                )
+            },
+        )
+        .expect("artifact agent should succeed");
+
+        let artifact_manifest = std::fs::read_to_string(&artifact.manifest_file)
+            .expect("artifact manifest should exist");
+        let artifact_manifest_json: serde_json::Value =
+            serde_json::from_str(&artifact_manifest).expect("artifact manifest json");
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["sourceLanes"][0],
+            "artifact-lane"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["roadmapIds"][0],
+            "ROADMAP #64"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["files"][0],
+            "ROADMAP.md"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["files"][1],
+            "rust/crates/tools/src/lib.rs"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["diffStat"],
+            "2 files, +12/-1."
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["verification"]
+                [0],
+            "tested"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["verification"]
+                [1],
+            "committed"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["verification"]
+                [2],
+            "pushed"
+        );
+        assert_eq!(
+            artifact_manifest_json["laneEvents"][1]["data"]["artifactProvenance"]["commitSha"],
+            "deadbee"
+        );
+
+        let cron = global_cron_registry().create(
+            "*/10 * * * *",
+            "roadmap-nudge-10min for ROADMAP #66",
+            Some("ROADMAP #66 reminder"),
+        );
+        let reminder = execute_agent_with_spawn(
+            AgentInput {
+                description: "Close ROADMAP #66 reminder shutdown".to_string(),
+                prompt: "Finish the cron shutdown fix".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("cron-closeout".to_string()),
+                model: None,
+            },
+            |job| {
+                persist_agent_terminal_state(
+                    &job.manifest,
+                    "completed",
+                    Some("Completed ROADMAP #66 after verification."),
+                    None,
+                )
+            },
+        )
+        .expect("reminder agent should succeed");
+
+        let reminder_manifest = std::fs::read_to_string(&reminder.manifest_file)
+            .expect("reminder manifest should exist");
+        let reminder_manifest_json: serde_json::Value =
+            serde_json::from_str(&reminder_manifest).expect("reminder manifest json");
+        assert_eq!(
+            reminder_manifest_json["laneEvents"][1]["data"]["disabledCronIds"][0],
+            cron.cron_id
+        );
+        let disabled_entry = global_cron_registry()
+            .get(&cron.cron_id)
+            .expect("cron should still exist");
+        assert!(!disabled_entry.enabled);
+
+        let resume_outcome =
+            extract_recovery_outcome("Continue from current mode state. [OMX_TMUX_INJECT]")
+                .expect("resume outcome should be detected");
+        assert_eq!(resume_outcome.cause, "resume_after_stop");
+        assert_eq!(
+            resume_outcome.preserved_state.as_deref(),
+            Some("current mode state")
+        );
 
         let spawn_error = execute_agent_with_spawn(
             AgentInput {
@@ -7271,6 +8337,10 @@ mod tests {
                 "tool failed: denied tool execution from hook",
                 LaneFailureClass::ToolRuntime,
             ),
+            (
+                "workspace mismatch while resuming the managed session",
+                LaneFailureClass::WorkspaceMismatch,
+            ),
             ("thread creation failed", LaneFailureClass::Infra),
         ];
 
@@ -7296,6 +8366,10 @@ mod tests {
             (
                 LaneEventName::BranchStaleAgainstMain,
                 "branch.stale_against_main",
+            ),
+            (
+                LaneEventName::BranchWorkspaceMismatch,
+                "branch.workspace_mismatch",
             ),
         ];
 
@@ -8271,11 +9345,12 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn given_read_only_enforcer_when_bash_then_denied() {
         let registry = read_only_registry();
+        // Use a command that requires DangerFullAccess (rm) to ensure it's blocked in read-only mode
         let err = registry
-            .execute("bash", &json!({ "command": "echo hi" }))
+            .execute("bash", &json!({ "command": "rm -rf /" }))
             .expect_err("bash should be denied in read-only mode");
         assert!(
-            err.contains("current mode is read-only"),
+            err.contains("current mode is 'read-only'"),
             "should cite active mode: {err}"
         );
     }

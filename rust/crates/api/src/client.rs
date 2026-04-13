@@ -239,10 +239,7 @@ mod tests {
                     openai_client.base_url()
                 );
             }
-            other => panic!(
-                "Expected ProviderClient::OpenAi for qwen-plus, got: {:?}",
-                other
-            ),
+            other => panic!("Expected ProviderClient::OpenAi for qwen-plus, got: {other:?}"),
         }
     }
 }
