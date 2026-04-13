@@ -275,6 +275,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
             base_commit,
             reasoning_effort,
+            allow_broad_cwd,
         } => {
             ensure_hackcode_ready()?;
             check_for_updates_async();
@@ -284,6 +285,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 permission_mode,
                 base_commit,
                 reasoning_effort,
+                allow_broad_cwd,
             )?;
         }
         CliAction::HelpTopic(topic) => print_help_topic(topic),
@@ -1237,19 +1239,25 @@ fn run_self_update() -> Result<(), Box<dyn std::error::Error>> {
     // Clone or pull
     if src_dir.join(".git").exists() {
         eprintln!("  {dim}Pulling latest...{nc}");
-        let _ = Command::new("git")
-            .args(["-C", &src_dir.to_string_lossy(), "checkout", "dev", "--quiet"])
+        // Fetch and hard-reset to avoid divergent branch errors
+        let fetch = Command::new("git")
+            .args(["-C", &src_dir.to_string_lossy(), "fetch", "origin", "dev", "--quiet"])
             .status();
-        let pull = Command::new("git")
-            .args(["-C", &src_dir.to_string_lossy(), "pull", "--quiet"])
-            .status();
-        if pull.map_or(true, |s| !s.success()) {
-            // If pull fails, re-clone
+        if fetch.map_or(false, |s| s.success()) {
+            let _ = Command::new("git")
+                .args(["-C", &src_dir.to_string_lossy(), "checkout", "dev", "--quiet"])
+                .status();
+            let _ = Command::new("git")
+                .args(["-C", &src_dir.to_string_lossy(), "reset", "--hard", "origin/dev"])
+                .status();
+        } else {
+            // If fetch fails, re-clone
             let _ = std::fs::remove_dir_all(&src_dir);
             let status = Command::new("git")
                 .args([
                     "clone",
                     "--quiet",
+                    "--branch", "dev",
                     "https://github.com/itwizardo/hackcode.git",
                     &src_dir.to_string_lossy(),
                 ])
@@ -1823,49 +1831,28 @@ fn check_auth_health() -> DiagnosticCheck {
     );
 
     match load_oauth_credentials() {
-        Ok(Some(token_set)) => {
-            let expired = oauth_token_is_expired(&api::OAuthTokenSet {
-                access_token: token_set.access_token.clone(),
-                refresh_token: token_set.refresh_token.clone(),
-                expires_at: token_set.expires_at,
-                scopes: token_set.scopes.clone(),
-            });
-            let mut details = vec![
-                format!(
-                    "Environment       api_key={} auth_token={}",
-                    if api_key_present { "present" } else { "absent" },
-                    if auth_token_present {
-                        "present"
-                    } else {
-                        "absent"
-                    }
-                ),
-                format!(
-                    "Saved OAuth       expires_at={} refresh_token={} scopes={}",
-                    token_set
-                        .expires_at
-                        .map_or_else(|| "<none>".to_string(), |value| value.to_string()),
-                    if token_set.refresh_token.is_some() {
-                        "present"
-                    } else {
-                        "absent"
-                    },
-                    if token_set.scopes.is_empty() {
-                        "<none>".to_string()
-                    } else {
-                        token_set.scopes.join(",")
-                    }
-                ),
-            ];
-            if expired {
-                details.push(
-                    "Suggested action  hackcodelogin to refresh local OAuth credentials".to_string(),
-                );
-            }
-            DiagnosticCheck::new(
-                "Auth",
-                if expired {
-                    DiagnosticLevel::Warn
+        Ok(Some(token_set)) => DiagnosticCheck::new(
+            "Auth",
+            if api_key_present || auth_token_present {
+                DiagnosticLevel::Ok
+            } else {
+                DiagnosticLevel::Warn
+            },
+            if api_key_present || auth_token_present {
+                "supported auth env vars are configured; legacy saved OAuth is ignored"
+            } else {
+                "legacy saved OAuth credentials are present but unsupported"
+            },
+        )
+        .with_details(vec![
+            env_details,
+            format!(
+                "Legacy OAuth      expires_at={} refresh_token={} scopes={}",
+                token_set
+                    .expires_at
+                    .map_or_else(|| "<none>".to_string(), |value| value.to_string()),
+                if token_set.refresh_token.is_some() {
+                    "present"
                 } else {
                     "absent"
                 },
@@ -3270,6 +3257,78 @@ fn run_stale_base_preflight(flag_value: Option<&str>) {
     let state = check_base_commit(&cwd, source.as_ref());
     if let Some(warning) = format_stale_base_warning(&state) {
         eprintln!("{warning}");
+    }
+}
+
+fn detect_broad_cwd() -> Option<PathBuf> {
+    let Ok(cwd) = env::current_dir() else {
+        return None;
+    };
+    let is_home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .is_some_and(|h| Path::new(&h) == cwd);
+    let is_root = cwd.parent().is_none();
+    if is_home || is_root {
+        Some(cwd)
+    } else {
+        None
+    }
+}
+
+fn enforce_broad_cwd_policy(
+    allow_broad_cwd: bool,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if allow_broad_cwd {
+        return Ok(());
+    }
+    let Some(cwd) = detect_broad_cwd() else {
+        return Ok(());
+    };
+
+    let is_interactive = io::stdin().is_terminal();
+
+    if is_interactive {
+        eprintln!(
+            "Warning: hackcode is running from a very broad directory ({}).\n\
+             The agent can read and search everything under this path.\n\
+             Consider running from inside your project: cd /path/to/project && hackcode",
+            cwd.display()
+        );
+        eprint!("Continue anyway? [y/N]: ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            eprintln!("Aborted.");
+            std::process::exit(0);
+        }
+        Ok(())
+    } else {
+        let message = format!(
+            "hackcode is running from a very broad directory ({}). \
+             The agent can read and search everything under this path. \
+             Use --allow-broad-cwd to proceed anyway, \
+             or run from inside your project: cd /path/to/project && hackcode",
+            cwd.display()
+        );
+        match output_format {
+            CliOutputFormat::Json => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "error",
+                        "error": message,
+                    })
+                );
+            }
+            CliOutputFormat::Text => {
+                eprintln!("error: {message}");
+            }
+        }
+        std::process::exit(1);
     }
 }
 
@@ -5025,6 +5084,7 @@ fn collect_sessions_from_dir(
         sessions.push(ManagedSessionSummary {
             id,
             path,
+            updated_at_ms: modified_epoch_millis as u64,
             modified_epoch_millis,
             message_count,
             parent_session_id,
