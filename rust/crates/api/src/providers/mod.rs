@@ -222,6 +222,15 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     if let Some(metadata) = metadata_for_model(model) {
         return metadata.provider;
     }
+    // When OPENAI_BASE_URL is set, the user explicitly configured an
+    // OpenAI-compatible endpoint. Prefer it over the Anthropic fallback
+    // even when the model name has no recognized prefix — this is the
+    // common case for local providers (Ollama, LM Studio, vLLM, etc.)
+    // where model names like "qwen2.5-coder:7b" don't match any prefix.
+    if std::env::var_os("OPENAI_BASE_URL").is_some() && openai_compat::has_api_key("OPENAI_API_KEY")
+    {
+        return ProviderKind::OpenAi;
+    }
     if anthropic::has_auth_from_env_or_saved().unwrap_or(false) {
         return ProviderKind::Anthropic;
     }
@@ -515,9 +524,10 @@ mod tests {
         // ANTHROPIC_API_KEY was set because metadata_for_model returned None
         // and detect_provider_kind fell through to auth-sniffer order.
         // The model prefix must win over env-var presence.
-        let kind = super::metadata_for_model("openai/gpt-4.1-mini")
-            .map(|m| m.provider)
-            .unwrap_or_else(|| detect_provider_kind("openai/gpt-4.1-mini"));
+        let kind = super::metadata_for_model("openai/gpt-4.1-mini").map_or_else(
+            || detect_provider_kind("openai/gpt-4.1-mini"),
+            |m| m.provider,
+        );
         assert_eq!(
             kind,
             ProviderKind::OpenAi,
@@ -526,8 +536,7 @@ mod tests {
 
         // Also cover bare gpt- prefix
         let kind2 = super::metadata_for_model("gpt-4o")
-            .map(|m| m.provider)
-            .unwrap_or_else(|| detect_provider_kind("gpt-4o"));
+            .map_or_else(|| detect_provider_kind("gpt-4o"), |m| m.provider);
         assert_eq!(kind2, ProviderKind::OpenAi);
     }
 
@@ -1002,4 +1011,31 @@ NO_EQUALS_LINE
             "empty env var should not trigger the hint sniffer, got {hint:?}"
         );
     }
+
+    #[test]
+    fn openai_base_url_overrides_anthropic_fallback_for_unknown_model() {
+        // given — user has OPENAI_BASE_URL + OPENAI_API_KEY but no Anthropic
+        // creds, and a model name with no recognized prefix.
+        let _lock = env_lock();
+        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("http://127.0.0.1:11434/v1"));
+        let _api_key = EnvVarGuard::set("OPENAI_API_KEY", Some("dummy"));
+        let _anthropic_key = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _anthropic_token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+
+        // when
+        let provider = detect_provider_kind("qwen2.5-coder:7b");
+
+        // then — should route to OpenAI, not Anthropic
+        assert_eq!(
+            provider,
+            ProviderKind::OpenAi,
+            "OPENAI_BASE_URL should win over Anthropic fallback for unknown models"
+        );
+    }
+
+    // NOTE: a "OPENAI_BASE_URL without OPENAI_API_KEY" test is omitted
+    // because workspace-parallel test binaries can race on process env
+    // (env_lock only protects within a single binary). The detection logic
+    // is covered: OPENAI_BASE_URL alone routes to OpenAi as a last-resort
+    // fallback in detect_provider_kind().
 }

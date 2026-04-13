@@ -13,6 +13,7 @@ const SESSION_VERSION: u32 = 1;
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
 const MAX_ROTATED_FILES: usize = 3;
 static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Speaker role associated with a persisted conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,11 @@ pub struct Session {
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
     pub prompt_history: Vec<SessionPromptEntry>,
+    /// The model used in this session, persisted so resumed sessions can
+    /// report which model was originally used.
+    /// Timestamp of last successful health check (ROADMAP #38)
+    pub last_health_check_ms: Option<u64>,
+    pub model: Option<String>,
     persistence: Option<SessionPersistence>,
 }
 
@@ -110,6 +116,7 @@ impl PartialEq for Session {
             && self.fork == other.fork
             && self.workspace_root == other.workspace_root
             && self.prompt_history == other.prompt_history
+            && self.last_health_check_ms == other.last_health_check_ms
     }
 }
 
@@ -161,6 +168,8 @@ impl Session {
             fork: None,
             workspace_root: None,
             prompt_history: Vec::new(),
+            last_health_check_ms: None,
+            model: None,
             persistence: None,
         }
     }
@@ -263,6 +272,8 @@ impl Session {
             }),
             workspace_root: self.workspace_root.clone(),
             prompt_history: self.prompt_history.clone(),
+            last_health_check_ms: self.last_health_check_ms,
+            model: self.model.clone(),
             persistence: None,
         }
     }
@@ -371,6 +382,10 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default();
+        let model = object
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .map(String::from);
         Ok(Self {
             version,
             session_id,
@@ -381,6 +396,8 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
+            last_health_check_ms: None,
+            model,
             persistence: None,
         })
     }
@@ -394,6 +411,7 @@ impl Session {
         let mut compaction = None;
         let mut fork = None;
         let mut workspace_root = None;
+        let mut model = None;
         let mut prompt_history = Vec::new();
 
         for (line_number, raw_line) in contents.lines().enumerate() {
@@ -433,6 +451,10 @@ impl Session {
                         .get("workspace_root")
                         .and_then(JsonValue::as_str)
                         .map(PathBuf::from);
+                    model = object
+                        .get("model")
+                        .and_then(JsonValue::as_str)
+                        .map(String::from);
                 }
                 "message" => {
                     let message_value = object.get("message").ok_or_else(|| {
@@ -475,6 +497,8 @@ impl Session {
             fork,
             workspace_root,
             prompt_history,
+            last_health_check_ms: None,
+            model,
             persistence: None,
         })
     }
@@ -579,6 +603,9 @@ impl Session {
                 "workspace_root".to_string(),
                 JsonValue::String(workspace_root_to_string(workspace_root)?),
             );
+        }
+        if let Some(model) = &self.model {
+            object.insert("model".to_string(), JsonValue::String(model.clone()));
         }
         Ok(JsonValue::Object(object))
     }
@@ -1004,10 +1031,27 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 }
 
 fn current_time_millis() -> u64 {
-    SystemTime::now()
+    let wall_clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let mut candidate = wall_clock;
+    loop {
+        let previous = LAST_TIMESTAMP_MS.load(Ordering::Relaxed);
+        if candidate <= previous {
+            candidate = previous.saturating_add(1);
+        }
+        match LAST_TIMESTAMP_MS.compare_exchange(
+            previous,
+            candidate,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return candidate,
+            Err(actual) => candidate = actual.saturating_add(1),
+        }
+    }
 }
 
 fn generate_session_id() -> String {
@@ -1099,14 +1143,24 @@ fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_rotated_logs, rotate_session_file_if_needed, ContentBlock, ConversationMessage,
-        MessageRole, Session, SessionFork,
+        cleanup_rotated_logs, current_time_millis, rotate_session_file_if_needed, ContentBlock,
+        ConversationMessage, MessageRole, Session, SessionFork,
     };
     use crate::json::JsonValue;
     use crate::usage::TokenUsage;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn session_timestamps_are_monotonic_under_tight_loops() {
+        let first = current_time_millis();
+        let second = current_time_millis();
+        let third = current_time_millis();
+
+        assert!(first < second);
+        assert!(second < third);
+    }
 
     #[test]
     fn persists_and_restores_session_jsonl() {
@@ -1441,12 +1495,8 @@ mod tests {
 /// Called by external consumers (e.g. clawhip) to enumerate sessions for a CWD.
 #[allow(dead_code)]
 pub fn workspace_sessions_dir(cwd: &std::path::Path) -> Result<std::path::PathBuf, SessionError> {
-    let store = crate::session_control::SessionStore::from_cwd(cwd).map_err(|e| {
-        SessionError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
-    })?;
+    let store = crate::session_control::SessionStore::from_cwd(cwd)
+        .map_err(|e| SessionError::Io(std::io::Error::other(e.to_string())))?;
     Ok(store.sessions_dir().to_path_buf())
 }
 
@@ -1463,8 +1513,7 @@ mod workspace_sessions_dir_tests {
         let result = workspace_sessions_dir(&tmp);
         assert!(
             result.is_ok(),
-            "workspace_sessions_dir should succeed for a valid CWD, got: {:?}",
-            result
+            "workspace_sessions_dir should succeed for a valid CWD, got: {result:?}"
         );
         let dir = result.unwrap();
         // The returned path should be non-empty and end with a hash component
