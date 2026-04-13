@@ -91,8 +91,7 @@ jobs:
           Clean merge — no conflicts. Review and merge when ready.
           BODY
           )" \
-            --base dev \
-            --label "upstream-sync" || true
+            --base dev
 
       - name: Create PR (with conflicts)
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.clean == 'false'
@@ -129,5 +128,4 @@ jobs:
           \`\`\`
           BODY
           )" \
-            --base dev \
-            --label "upstream-sync" || true
+            --base dev
