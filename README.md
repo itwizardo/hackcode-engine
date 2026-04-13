@@ -369,7 +369,18 @@ One command to pull the latest code and rebuild:
 hackcode --update
 ```
 
-Upstream improvements from Claw Code are synced daily via GitHub Actions — new tools, bug fixes, and engine improvements flow in automatically while your HackCode customizations stay intact.
+That's it. It pulls the latest source from the `dev` branch, rebuilds the Rust binary, and installs it — all automatically.
+
+If auto-update fails (network issues, build errors, etc.), update manually:
+
+```bash
+git clone --branch dev https://github.com/itwizardo/hackcode.git
+cd hackcode/rust
+cargo build --release -p rusty-claude-cli
+cp target/release/hackcode ~/.local/bin/
+```
+
+Upstream improvements from Claw Code are synced every 6 hours via GitHub Actions — new tools, bug fixes, and engine improvements flow in automatically while your HackCode customizations stay intact.
 
 ---
 
