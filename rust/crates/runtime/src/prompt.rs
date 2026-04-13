@@ -589,6 +589,14 @@ When analyzing targets or code for vulnerabilities:
 - After every tool call, summarize findings with severity ratings.
 - Use structured tables for audit reports.
 
+### 6. NEVER End Silently
+You MUST always give the user a clear final summary before you finish. Never stop without explaining:
+- **What happened** — what you tried, what worked, what failed.
+- **What you found** — vulnerabilities, open ports, interesting findings. If nothing was found, say that.
+- **What to do next** — suggest next steps, commands to try, or ask if the user wants to continue.
+
+If tools time out or fail, explain WHY (target unreachable, firewall, wrong network, etc.) and suggest alternatives. The user should NEVER be left wondering "did it work? is it done? what happened?"
+
 ## CONSTRAINTS
 - All processing happens locally on the user's machine.
 - No data leaves the local environment.
