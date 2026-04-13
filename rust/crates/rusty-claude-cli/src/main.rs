@@ -3946,14 +3946,6 @@ impl LiveCli {
     }
 
     fn startup_banner(&self) -> String {
-        let g = "\x1b[38;2;0;255;65m"; // green
-        let dg = "\x1b[38;2;0;140;30m"; // dim green
-        let b = "\x1b[1m"; // bold
-        let d = "\x1b[2m"; // dim
-        let r = "\x1b[0m"; // reset
-        let sc = "\x1b[38;2;0;255;65m"; // skull color
-        let ec = "\x1b[38;2;255;60;60m"; // eye color
-
         let cwd = env::current_dir().map_or_else(
             |_| "<unknown>".to_string(),
             |path| path.display().to_string(),
@@ -3962,101 +3954,40 @@ impl LiveCli {
         let git_branch = status
             .as_ref()
             .and_then(|context| context.git_branch.as_deref())
-            .unwrap_or("–");
+            .unwrap_or("unknown");
         let workspace = status.as_ref().map_or_else(
-            || "–".to_string(),
-            |context| {
-                let h = context.git_summary.headline();
-                if h.len() > 20 { format!("{}…", &h[..19]) } else { h }
-            },
+            || "unknown".to_string(),
+            |context| context.git_summary.headline(),
         );
-
-        // Truncate cwd for display
-        let short_cwd = if cwd.len() > 30 {
-            let parts: Vec<&str> = cwd.split('/').collect();
-            if parts.len() > 3 {
-                format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-            } else {
-                format!("…{}", &cwd[cwd.len() - 29..])
-            }
-        } else {
-            cwd.clone()
-        };
-
-        let model_short = if self.model.len() > 22 {
-            format!("{}…", &self.model[..21])
-        } else {
-            self.model.clone()
-        };
-
-        let session_short = {
-            let s = &self.session.id;
-            if s.len() > 16 { format!("{}…", &s[..15]) } else { s.clone() }
-        };
-
-        let perm = self.permission_mode.as_str();
-
-        // Build banner as a simple two-column box.
-        // Left column = 26 chars content, Right column = 28 chars content.
-        // Total inner = 26 + 3 (divider) + 28 = 57 chars.
-        let w: usize = 59; // total inner width (between │ and │)
-        let lw: usize = 27; // left content width
-        let rw: usize = 28; // right content width
-
-        // Helper: pad plain text to width (for non-ANSI content width calculation)
-        fn rpad(text: &str, width: usize) -> String {
-            if text.len() >= width { text[..width].to_string() }
-            else { format!("{}{}", text, " ".repeat(width - text.len())) }
-        }
-
-        // Build each row as: "│ {left_padded} │ {right_padded} │"
-        // Colors are injected per-cell, reset at cell boundary.
-        let rows: Vec<String> = vec![
-            // Row 0: welcome + tips header
-            format!("{g}│{r}  {b}Ready to hack.{r}{}  {dg}│{r}  {g}{b}Tips{r}{}  {g}│{r}",
-                " ".repeat(lw - 16), " ".repeat(rw - 6)),
-            // Row 1: blank + /help
-            format!("{g}│{r}{}  {dg}│{r}  {d}/help{r}  commands & usage{}  {g}│{r}",
-                " ".repeat(lw), " ".repeat(rw - 26)),
-            // Row 2: skull line 1 + /tools
-            format!("{g}│{r}      {sc} ▄▄███▄▄ {r}{}  {dg}│{r}  {d}/tools{r} security toolkit{}  {g}│{r}",
-                " ".repeat(lw - 17), " ".repeat(rw - 27)),
-            // Row 3: skull line 2 (eyes) + Tab
-            format!("{g}│{r}      {sc}█{ec}▀▀{sc}███{ec}▀▀{sc}█{r}{}  {dg}│{r}  {d}Tab{r}    completions{}  {g}│{r}",
-                " ".repeat(lw - 17), " ".repeat(rw - 22)),
-            // Row 4: skull line 3 + blank
-            format!("{g}│{r}      {sc}██▄███▄██{r}{}  {dg}│{r}{}  {g}│{r}",
-                " ".repeat(lw - 15), " ".repeat(rw)),
-            // Row 5: skull line 4 + status header
-            format!("{g}│{r}       {sc}▀█▀▀▀█▀ {r}{}  {dg}│{r}  {g}{b}Status{r}{}  {g}│{r}",
-                " ".repeat(lw - 17), " ".repeat(rw - 8)),
-            // Row 6: blank + branch
-            format!("{g}│{r}{}  {dg}│{r}  {d}Branch{r}    {}  {g}│{r}",
-                " ".repeat(lw), rpad(git_branch, rw - 12)),
-            // Row 7: model + workspace
-            format!("{g}│{r}  {d}Model{r}  {}  {dg}│{r}  {d}Workspace{r} {}  {g}│{r}",
-                rpad(&model_short, lw - 9), rpad(&workspace, rw - 12)),
-            // Row 8: perms + session
-            format!("{g}│{r}  {d}Perms{r}  {}  {dg}│{r}  {d}Session{r}   {}  {g}│{r}",
-                rpad(perm, lw - 9), rpad(&session_short, rw - 12)),
-            // Row 9: dir + blank
-            format!("{g}│{r}  {d}Dir{r}    {}  {dg}│{r}{}  {g}│{r}",
-                rpad(&short_cwd, lw - 9), " ".repeat(rw)),
-        ];
-
-        let title = format!(" HackCode v{} ", env!("CARGO_PKG_VERSION"));
-        let fill = w.saturating_sub(title.len() + 2);
-        let top = format!("{g}╭─{b}{title}{r}{g}{}╮{r}", "─".repeat(fill));
-        let bottom = format!("{g}╰{}╯{r}", "─".repeat(w));
-
-        let mut out = format!("{top}\n");
-        for row in &rows {
-            out.push_str(row);
-            out.push('\n');
-        }
-        out.push_str(&bottom);
-        out.push_str(&format!("\n{dg}  >> 100% Local · No Cloud · No Censorship <<{r}"));
-        out
+        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
+            |_| self.session.path.display().to_string(),
+            |path| path.display().to_string(),
+        );
+        format!(
+            "\x1b[38;2;0;255;65m\
+ ██╗  ██╗ █████╗  ██████╗██╗  ██╗ ██████╗ ██████╗ ██████╗ ███████╗\n\
+ ██║  ██║██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔═══██╗██╔══██╗██╔════╝\n\
+ ███████║███████║██║     █████╔╝ ██║     ██║   ██║██║  ██║█████╗\n\
+ ██╔══██║██╔══██║██║     ██╔═██╗ ██║     ██║   ██║██║  ██║██╔══╝\n\
+ ██║  ██║██║  ██║╚██████╗██║  ██╗╚██████╗╚██████╔╝██████╔╝███████╗\n\
+ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝\x1b[0m\n\
+\x1b[38;2;0;140;30m  >> AI-Powered Hacking Terminal  |  100% Local  |  No Censorship <<\x1b[0m\n\n\
+  \x1b[2mModel\x1b[0m            {}\n\
+  \x1b[2mPermissions\x1b[0m      {}\n\
+  \x1b[2mBranch\x1b[0m           {}\n\
+  \x1b[2mWorkspace\x1b[0m        {}\n\
+  \x1b[2mDirectory\x1b[0m        {}\n\
+  \x1b[2mSession\x1b[0m          {}\n\
+  \x1b[2mAuto-save\x1b[0m        {}\n\n\
+  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/tools\x1b[0m for security tools · \x1b[2mTab\x1b[0m for completions · \x1b[2mShift+Enter\x1b[0m for newline",
+            self.model,
+            self.permission_mode.as_str(),
+            git_branch,
+            workspace,
+            cwd,
+            self.session.id,
+            session_path,
+        )
     }
 
     fn repl_completion_candidates(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
