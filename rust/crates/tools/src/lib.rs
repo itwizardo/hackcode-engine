@@ -5985,6 +5985,9 @@ fn execute_shell_command(
         .stderr(std::process::Stdio::piped());
 
     if let Some(timeout_ms) = timeout {
+        // Floor: 30 seconds minimum — the model often passes small values
+        // thinking the unit is seconds, but it's milliseconds.
+        let timeout_ms = timeout_ms.max(30_000);
         let mut child = process.spawn()?;
         let started = Instant::now();
         loop {

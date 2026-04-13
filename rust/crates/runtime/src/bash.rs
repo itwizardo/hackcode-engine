@@ -109,7 +109,11 @@ async fn execute_bash_async(
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
 
+    // The model often passes timeout values thinking they're seconds (e.g. 60)
+    // but the parameter is in milliseconds.  Enforce a 30-second floor so
+    // network commands (nmap, curl, ping) actually have time to finish.
     let output_result = if let Some(timeout_ms) = input.timeout {
+        let timeout_ms = timeout_ms.max(30_000);
         match timeout(Duration::from_millis(timeout_ms), command.output()).await {
             Ok(result) => (result?, false),
             Err(_) => {
