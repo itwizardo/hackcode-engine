@@ -328,6 +328,57 @@ Pure Rust. Single binary. No Node.js, no Python runtime, no garbage collection. 
 
 ---
 
+## Auto PDF Reports
+
+When HackCode detects a security audit in its output — vulnerability scans, threat assessments, penetration test results — it **automatically generates a PDF report** and saves it to your current directory.
+
+```
+> scan this project for security vulnerabilities
+
+  ▶ bash  $ grep -rn "password|secret|token" ...
+  ...
+
+  HACKCODE SECURITY AUDIT REPORT
+  ┌───────────────┬───────────┬──────────────────────────────┐
+  │ Category      │ Severity  │ Finding                      │
+  ├───────────────┼───────────┼──────────────────────────────┤
+  │ Auth          │ ✅ LOW    │ No hardcoded API keys        │
+  │ OAuth         │ ⚠️ MEDIUM│ Cleartext token storage      │
+  │ Endpoints     │ ⚠️ MEDIUM│ API URLs exposed in source   │
+  └───────────────┴───────────┴──────────────────────────────┘
+
+✔ Execution complete
+
+[HackCode] Security report saved → ./hackcode-report-2026-04-13-143022.pdf
+```
+
+No extra commands. No flags. It just knows when you ran an audit and drops a clean PDF. Hand it to a client, attach it to a ticket.
+
+---
+
+## Reacher Dashboard
+
+HackCode ships with [Reacher Dashboard](https://github.com/itwizardo/reacher-dashboard) — a self-hosted email verification UI powered by the open-source [Reacher](https://github.com/reacherhq/check-if-email-exists) API.
+
+Verify emails before they hit your mailing list. Catch invalid, disposable, and risky addresses. Export clean lists as CSV.
+
+- **Bulk verification** — drag-drop a CSV, verify thousands of emails
+- **5x parallel** — verifies 5 emails at once
+- **Filter tabs** — All / Safe / Risky / Invalid / Unknown
+- **Separate exports** — export only safe emails, only invalid, or all
+- **Self-hosted** — runs on your own server, no third-party SaaS
+- **Single HTML file** — zero dependencies, works offline
+
+```bash
+# Deploy on any VPS
+git clone https://github.com/itwizardo/reacher-dashboard.git
+cd reacher-dashboard && docker-compose up -d
+```
+
+Open `http://your-server-ip` and start verifying.
+
+---
+
 ## Self-Updating
 
 HackCode checks for updates on startup. When a new version is available:
