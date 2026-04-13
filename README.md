@@ -7,14 +7,7 @@
 </p>
 
 <div align="center">
-<pre>
- ██╗  ██╗ █████╗  ██████╗██╗  ██╗ ██████╗ ██████╗ ██████╗ ███████╗
- ██║  ██║██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
- ███████║███████║██║     █████╔╝ ██║     ██║   ██║██║  ██║█████╗
- ██╔══██║██╔══██║██║     ██╔═██╗ ██║     ██║   ██║██║  ██║██╔══╝
- ██║  ██║██║  ██║╚██████╗██║  ██╗╚██████╗╚██████╔╝██████╔╝███████╗
- ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
-</pre>
+  <img src="assets/hackcode-terminal.png" alt="HackCode Terminal" width="800">
 </div>
 
 <h3 align="center">The open-source, uncensored alternative to Claude Code & Claude Mythos.<br>Built for hackers. Runs entirely on your machine.</h3>
