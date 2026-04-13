@@ -259,10 +259,11 @@ impl Spinner {
         out: &mut impl Write,
     ) -> io::Result<()> {
         self.stop_animation();
-        // Print done message on a new line — don't clear the current line
-        // because it may contain the last line of the AI response.
+        // Newline first so the ✔ never lands on the same line as the
+        // AI response text (which has no trailing newline after trim).
         execute!(
             out,
+            Print("\n"),
             SetForegroundColor(theme.spinner_done),
             Print(format!("✔ {label}\n")),
             ResetColor
@@ -279,6 +280,7 @@ impl Spinner {
         self.stop_animation();
         execute!(
             out,
+            Print("\n"),
             SetForegroundColor(theme.spinner_failed),
             Print(format!("✘ {label}\n")),
             ResetColor
