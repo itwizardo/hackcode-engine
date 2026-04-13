@@ -9,6 +9,7 @@
 mod init;
 mod input;
 mod render;
+mod report;
 mod scanner;
 mod setup;
 
@@ -1184,6 +1185,9 @@ fn run_self_update() -> Result<(), Box<dyn std::error::Error>> {
     // Clone or pull
     if src_dir.join(".git").exists() {
         eprintln!("  {dim}Pulling latest...{nc}");
+        let _ = Command::new("git")
+            .args(["-C", &src_dir.to_string_lossy(), "checkout", "dev", "--quiet"])
+            .status();
         let pull = Command::new("git")
             .args(["-C", &src_dir.to_string_lossy(), "pull", "--quiet"])
             .status();
@@ -1209,6 +1213,7 @@ fn run_self_update() -> Result<(), Box<dyn std::error::Error>> {
             .args([
                 "clone",
                 "--quiet",
+                "--branch", "dev",
                 "https://github.com/itwizardo/hackcode.git",
                 &src_dir.to_string_lossy(),
             ])
@@ -3849,6 +3854,16 @@ impl LiveCli {
                         format_auto_compaction_notice(event.removed_message_count)
                     );
                 }
+
+                // Auto-generate PDF report if the response is a security audit
+                let response_text = final_assistant_text(&summary);
+                if report::is_audit_report(&response_text) {
+                    match report::generate_report(&response_text) {
+                        Ok(path) => report::print_report_saved(&path),
+                        Err(e) => eprintln!("\x1b[91m[HackCode]\x1b[0m Failed to save report: {e}"),
+                    }
+                }
+
                 self.persist_session()?;
                 Ok(())
             }
