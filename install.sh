@@ -93,23 +93,40 @@ if [ "$INSTALLED" = false ]; then
 
     cd "$HACKCODE_SRC/rust"
 
-    # Build with live progress percentage (~200 crates expected)
-    EST=200
-    BUILT=0
-    cargo build --release -p rusty-claude-cli 2>&1 | while IFS= read -r line; do
-        case "$line" in
-            *Compiling*)
-                BUILT=$((BUILT + 1))
-                PCT=$((BUILT * 100 / EST))
-                [ "$PCT" -gt 99 ] && PCT=99
-                CRATE=$(echo "$line" | sed 's/.*Compiling \([^ ]*\).*/\1/')
-                printf "\r  ${GREEN}[%3d%%]${NC} Compiling ${DIM}%-30s${NC}" "$PCT" "$CRATE"
-                ;;
-            *Finished*)
-                printf "\r  ${GREEN}[100%%]${NC} Build complete %-40s\n" " "
-                ;;
-        esac
-    done
+    # Build with live progress — disable set -e around the pipe so
+    # the while-subshell exit doesn't kill the script before cp runs.
+    BUILD_LOG=$(mktemp)
+    echo -e "  ${DIM}Compiling (~200 crates, this may take a few minutes)...${NC}"
+
+    set +e
+    cargo build --release -p rusty-claude-cli 2>&1 | tee "$BUILD_LOG" | {
+        EST=200
+        BUILT=0
+        while IFS= read -r line; do
+            case "$line" in
+                *Compiling*)
+                    BUILT=$((BUILT + 1))
+                    PCT=$((BUILT * 100 / EST))
+                    [ "$PCT" -gt 99 ] && PCT=99
+                    CRATE=$(echo "$line" | sed 's/.*Compiling \([^ ]*\).*/\1/')
+                    printf "\r  ${GREEN}[%3d%%]${NC} Compiling ${DIM}%-30s${NC}" "$PCT" "$CRATE"
+                    ;;
+                *Finished*)
+                    printf "\r  ${GREEN}[100%%]${NC} Build complete %-40s\n" " "
+                    ;;
+            esac
+        done
+    }
+    BUILD_EXIT=${PIPESTATUS[0]:-$?}
+    set -e
+    rm -f "$BUILD_LOG"
+
+    if [ "$BUILD_EXIT" -ne 0 ] || [ ! -f "target/release/hackcode" ]; then
+        echo ""
+        echo -e "  ${RED}Build failed (exit code $BUILD_EXIT)${NC}"
+        echo -e "  ${DIM}Check that Rust toolchain is up to date: rustup update${NC}"
+        exit 1
+    fi
 
     mkdir -p "$INSTALL_DIR"
     cp "target/release/hackcode" "$INSTALL_DIR/hackcode"
