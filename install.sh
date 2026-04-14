@@ -161,8 +161,8 @@ if [ -n "$RC" ]; then
 fi
 export PATH="$INSTALL_DIR:$PATH"
 
-# ─── Ollama ───────────────────────────────────────────────
-echo -e "${GREEN}[4/4]${NC} Checking Ollama..."
+# ─── Ollama + Model ───────────────────────────────────────
+echo -e "${GREEN}[4/4]${NC} Setting up Ollama + AI model..."
 
 OLLAMA_BIN=""
 if command -v ollama &>/dev/null; then
@@ -174,22 +174,68 @@ fi
 if [ -n "$OLLAMA_BIN" ]; then
     echo -e "  ${GREEN}Ollama found ✓${NC}"
 
-    # Pull default model if none exist
-    MODEL_COUNT=$($OLLAMA_BIN list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-    if [ "$MODEL_COUNT" = "0" ]; then
+    # Check if hackcode-uncensored alias already exists
+    if $OLLAMA_BIN list 2>/dev/null | grep -q "hackcode-uncensored"; then
+        echo -e "  ${GREEN}hackcode-uncensored model ready ✓${NC}"
+    else
+        # Pick best model based on available RAM
+        RAM_GB=8
+        case "$PLATFORM" in
+            macos) RAM_GB=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%d", $1/1073741824}') ;;
+            linux) RAM_GB=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null) ;;
+        esac
+
+        # Try models in order of preference (largest that fits → smallest fallback)
+        BASE_MODEL=""
+        MODEL_DESC=""
+        if [ "$RAM_GB" -ge 24 ]; then
+            BASE_MODEL="tripolskypetr/qwen3.5-uncensored-aggressive:35b"
+            MODEL_DESC="Qwen3.5-35B-A3B MoE Uncensored (~21GB)"
+        elif [ "$RAM_GB" -ge 8 ]; then
+            BASE_MODEL="qwen3:8b"
+            MODEL_DESC="Qwen3-8B (~5GB)"
+        else
+            BASE_MODEL="tripolskypetr/qwen3.5-uncensored-aggressive:4b"
+            MODEL_DESC="Qwen3.5-4B Uncensored (~3GB)"
+        fi
+
         echo ""
-        echo -e "  ${DIM}No models found. Pulling default model...${NC}"
-        echo -e "  ${BOLD}Qwen3.5-8B Uncensored${NC} (~5GB download)"
+        echo -e "  ${DIM}RAM: ${RAM_GB}GB — pulling ${BOLD}${MODEL_DESC}${NC}"
         echo ""
-        $OLLAMA_BIN pull "tripolskypetr/qwen3.5-uncensored-aggressive:8b" || true
+
+        PULLED=false
+        # Try primary pick, then fallbacks
+        for TRY_MODEL in "$BASE_MODEL" "qwen3:8b" "tripolskypetr/qwen3.5-uncensored-aggressive:4b" "qwen3:4b"; do
+            if $OLLAMA_BIN pull "$TRY_MODEL" 2>/dev/null; then
+                BASE_MODEL="$TRY_MODEL"
+                PULLED=true
+                break
+            fi
+            echo -e "  ${DIM}$TRY_MODEL not available, trying next...${NC}"
+        done
+
+        if [ "$PULLED" = true ]; then
+            # Create hackcode-uncensored alias via Modelfile
+            HACKCODE_CFG="${HOME}/.config/hackcode"
+            mkdir -p "$HACKCODE_CFG"
+            cat > "${HACKCODE_CFG}/Modelfile" << MODELFILE
+FROM ${BASE_MODEL}
+PARAMETER temperature 0.7
+PARAMETER num_ctx 32768
+MODELFILE
+            $OLLAMA_BIN create hackcode-uncensored -f "${HACKCODE_CFG}/Modelfile" 2>/dev/null
+            echo -e "  ${GREEN}Model ready as ${BOLD}hackcode-uncensored${NC} ${GREEN}✓${NC}"
+        else
+            echo -e "  ${RED}Could not pull any model${NC}"
+            echo -e "  ${DIM}Run: ollama pull qwen3:8b && hackcode --setup${NC}"
+        fi
     fi
 else
-    echo -e "  ${RED}Ollama not found${NC}"
+    echo -e "  ${RED}Ollama not found${NC} — required for local AI"
     if [ "$PLATFORM" = "macos" ]; then
-        echo -e "  ${DIM}Install Ollama: https://ollama.ai/download${NC}"
-        echo -e "  ${DIM}Or: brew install ollama${NC}"
+        echo -e "  ${DIM}Install: brew install ollama  ${NC}or${DIM}  https://ollama.ai/download${NC}"
     else
-        echo -e "  ${DIM}Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh${NC}"
+        echo -e "  ${DIM}Install: curl -fsSL https://ollama.ai/install.sh | sh${NC}"
     fi
 fi
 
