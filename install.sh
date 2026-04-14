@@ -45,10 +45,10 @@ case "$ARCH" in
 esac
 
 ARTIFACT="hackcode-${PLATFORM}-${ARCH_NAME}"
-echo -e "${GREEN}[1/4]${NC} Detected: ${BOLD}${OS} ${ARCH}${NC} -> ${ARTIFACT}"
+echo -e "${GREEN}[1/5]${NC} Detected: ${BOLD}${OS} ${ARCH}${NC} -> ${ARTIFACT}"
 
 # ─── Try downloading pre-built binary ─────────────────────
-echo -e "${GREEN}[2/4]${NC} Getting HackCode..."
+echo -e "${GREEN}[2/5]${NC} Getting HackCode..."
 
 INSTALLED=false
 
@@ -135,7 +135,7 @@ if [ "$INSTALLED" = false ]; then
 fi
 
 # ─── Add to PATH ──────────────────────────────────────────
-echo -e "${GREEN}[3/4]${NC} Adding hackcode to PATH..."
+echo -e "${GREEN}[3/5]${NC} Adding hackcode to PATH..."
 
 SHELL_NAME=$(basename "$SHELL")
 case "$SHELL_NAME" in
@@ -162,7 +162,7 @@ fi
 export PATH="$INSTALL_DIR:$PATH"
 
 # ─── Ollama + Model ───────────────────────────────────────
-echo -e "${GREEN}[4/4]${NC} Setting up Ollama + AI model..."
+echo -e "${GREEN}[4/5]${NC} Pulling AI model..."
 
 OLLAMA_BIN=""
 if command -v ollama &>/dev/null; then
@@ -206,7 +206,7 @@ if [ -n "$OLLAMA_BIN" ]; then
         PULLED=false
         # Try primary pick, then fallbacks
         for TRY_MODEL in "$BASE_MODEL" "qwen3:8b" "tripolskypetr/qwen3.5-uncensored-aggressive:4b" "qwen3:4b"; do
-            if $OLLAMA_BIN pull "$TRY_MODEL" 2>/dev/null; then
+            if $OLLAMA_BIN pull "$TRY_MODEL"; then
                 BASE_MODEL="$TRY_MODEL"
                 PULLED=true
                 break
@@ -215,7 +215,10 @@ if [ -n "$OLLAMA_BIN" ]; then
         done
 
         if [ "$PULLED" = true ]; then
-            # Create hackcode-uncensored alias via Modelfile
+            echo -e "  ${GREEN}Model pulled ✓${NC}"
+
+            # Step 5: Create hackcode-uncensored alias
+            echo -e "${GREEN}[5/5]${NC} Creating hackcode-uncensored model..."
             HACKCODE_CFG="${HOME}/.config/hackcode"
             mkdir -p "$HACKCODE_CFG"
             cat > "${HACKCODE_CFG}/Modelfile" << MODELFILE
@@ -223,8 +226,8 @@ FROM ${BASE_MODEL}
 PARAMETER temperature 0.7
 PARAMETER num_ctx 32768
 MODELFILE
-            $OLLAMA_BIN create hackcode-uncensored -f "${HACKCODE_CFG}/Modelfile" 2>/dev/null
-            echo -e "  ${GREEN}Model ready as ${BOLD}hackcode-uncensored${NC} ${GREEN}✓${NC}"
+            $OLLAMA_BIN create hackcode-uncensored -f "${HACKCODE_CFG}/Modelfile"
+            echo -e "  ${GREEN}hackcode-uncensored ready ✓${NC}"
         else
             echo -e "  ${RED}Could not pull any model${NC}"
             echo -e "  ${DIM}Run: ollama pull qwen3:8b && hackcode --setup${NC}"
