@@ -99,6 +99,7 @@ if [ "$INSTALLED" = false ]; then
     echo -e "  ${DIM}Compiling (~200 crates, this may take a few minutes)...${NC}"
 
     set +e
+    printf "\033[?25l"  # hide cursor during build
     cargo build --release -p rusty-claude-cli 2>&1 | tee "$BUILD_LOG" | {
         EST=200
         BUILT=0
@@ -109,14 +110,15 @@ if [ "$INSTALLED" = false ]; then
                     PCT=$((BUILT * 100 / EST))
                     [ "$PCT" -gt 99 ] && PCT=99
                     CRATE=$(echo "$line" | sed 's/.*Compiling \([^ ]*\).*/\1/')
-                    printf "\r  ${GREEN}[%3d%%]${NC} Compiling ${DIM}%-30s${NC}" "$PCT" "$CRATE"
+                    printf "\r\033[K  ${GREEN}[%3d%%]${NC} Compiling ${DIM}%s${NC}" "$PCT" "$CRATE"
                     ;;
                 *Finished*)
-                    printf "\r  ${GREEN}[100%%]${NC} Build complete %-40s\n" " "
+                    printf "\r\033[K  ${GREEN}[100%%]${NC} Build complete\n"
                     ;;
             esac
         done
     }
+    printf "\033[?25h"  # restore cursor
     BUILD_EXIT=${PIPESTATUS[0]:-$?}
     set -e
     rm -f "$BUILD_LOG"
