@@ -96,6 +96,8 @@ impl OpenAiCompatConfig {
             api_key_env: "OLLAMA_API_KEY",
             base_url_env: "OLLAMA_BASE_URL",
             default_base_url: DEFAULT_OLLAMA_BASE_URL,
+            // Ollama is local — no practical limit, use a generous 100MB
+            max_request_body_bytes: OPENAI_MAX_REQUEST_BODY_BYTES,
         }
     }
 
