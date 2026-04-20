@@ -484,11 +484,14 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing value for --model".to_string())?;
+                validate_model_syntax(value)?;
                 model = resolve_model_alias_with_config(value);
                 index += 2;
             }
             flag if flag.starts_with("--model=") => {
-                model = resolve_model_alias_with_config(&flag[8..]);
+                let value = &flag[8..];
+                validate_model_syntax(value)?;
+                model = resolve_model_alias_with_config(value);
                 index += 1;
             }
             "--output-format" => {
@@ -780,6 +783,31 @@ fn parse_single_word_command_alias(
     permission_mode_override: Option<PermissionMode>,
     output_format: CliOutputFormat,
 ) -> Option<Result<CliAction, String>> {
+    if rest.is_empty() {
+        return None;
+    }
+
+    // Diagnostic verbs (help, version, status, sandbox, doctor, state) accept only the verb itself
+    // or --help / -h as a suffix. Any other suffix args are unrecognized.
+    let verb = &rest[0];
+    let is_diagnostic = matches!(
+        verb.as_str(),
+        "help" | "version" | "status" | "sandbox" | "doctor" | "state"
+    );
+
+    if is_diagnostic && rest.len() > 1 {
+        // Diagnostic verb with trailing args: reject unrecognized suffix
+        if is_help_flag(&rest[1]) && rest.len() == 2 {
+            // "doctor --help" is valid, routed to parse_local_help_action() instead
+            return None;
+        }
+        // Unrecognized suffix like "--json"
+        return Some(Err(format!(
+            "unrecognized argument `{}` for subcommand `{}`",
+            rest[1], verb
+        )));
+    }
+
     if rest.len() != 1 {
         return None;
     }
@@ -1070,6 +1098,37 @@ fn resolve_model_alias_with_config(model: &str) -> String {
         return resolve_model_alias(&resolved).to_string();
     }
     resolve_model_alias(trimmed).to_string()
+}
+
+/// Validate model syntax at parse time.
+/// Accepts: known aliases (opus, sonnet, haiku) or provider/model pattern.
+/// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
+fn validate_model_syntax(model: &str) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err("model string cannot be empty".to_string());
+    }
+    // Known aliases are always valid
+    match trimmed {
+        "opus" | "sonnet" | "haiku" => return Ok(()),
+        _ => {}
+    }
+    // Check for spaces (malformed)
+    if trimmed.contains(' ') {
+        return Err(format!(
+            "invalid model syntax: '{}' contains spaces. Use provider/model format or known alias",
+            trimmed
+        ));
+    }
+    // Check provider/model format: provider_id/model_id
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(format!(
+            "invalid model syntax: '{}'. Expected provider/model (e.g., anthropic/claude-opus-4-6) or known alias (opus, sonnet, haiku)",
+            trimmed
+        ));
+    }
+    Ok(())
 }
 
 fn config_alias_for_current_dir(alias: &str) -> Option<String> {
