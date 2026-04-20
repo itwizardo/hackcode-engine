@@ -4484,6 +4484,7 @@ fn classify_lane_blocker(error: &str) -> LaneEventBlocker {
     LaneEventBlocker {
         failure_class: classify_lane_failure(error),
         detail,
+        subphase: None,
     }
 }
 
