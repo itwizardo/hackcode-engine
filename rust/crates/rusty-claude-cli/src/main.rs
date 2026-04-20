@@ -5667,10 +5667,11 @@ fn render_help_topic(topic: LocalHelpTopic) -> String {
   Related          /doctor · hackcode--resume latest /doctor"
             .to_string(),
         LocalHelpTopic::Acp => "ACP / Zed
-  Usage            claw acp [serve]
+  Usage            claw acp [serve] [--output-format <format>]
   Aliases          claw --acp · claw -acp
   Purpose          explain the current editor-facing ACP/Zed launch contract without starting the runtime
   Status           discoverability only; `serve` is a status alias and does not launch a daemon yet
+  Formats          text (default), json
   Related          ROADMAP #64a (discoverability) · ROADMAP #76 (real ACP support) · claw --help"
             .to_string(),
     }
