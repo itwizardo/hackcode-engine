@@ -830,6 +830,25 @@ Acceptance:
 - channel status updates stay short and machine-grounded
 - claws stop inferring state from raw build spam
 
+### 137. Model-alias shorthand regression in test suite — bare alias parsing broken on `feat/134-135-session-identity` branch
+
+**Filed:** 2026-04-21 from dogfood cycle — `cargo test --workspace` on `feat/134-135-session-identity` HEAD (`91ba54d`) shows 3 failing tests.
+
+**Problem:** `tests::parses_bare_prompt_and_json_output_flag`, `tests::multi_word_prompt_still_uses_shorthand_prompt_mode`, and `tests::env_permission_mode_overrides_project_config_default` all panic with:
+```
+args should parse: "invalid model syntax: 'claude-opus'. Expected provider/model (e.g., anthropic/claude-opus-4-6) or known alias (opus, sonnet, haiku)"
+```
+The #134/#135 session-identity work tightened model-syntax validation but the test fixtures still pass bare `claude-opus` style strings that the new validator rejects. 162 tests pass; only the three tests using legacy bare-alias model names fail.
+
+**Fix shape:**
+- Update the three failing test fixtures to use either a valid alias (`opus`, `sonnet`, `haiku`) or a fully-qualified model id (`anthropic/claude-opus-4-6`)
+- Alternatively, if `claude-opus` is an intended supported alias, add it to the alias registry
+- Verify `cargo test --workspace` returns 0 failures before merging the feat branch to `main`
+
+**Acceptance:**
+- `cargo test --workspace` passes with 0 failures on the `feat/134-135-session-identity` branch
+- No regression on the 162 tests currently passing
+
 ### 133. Blocked-state subphase contract (was §6.5)
 **Filed:** 2026-04-20 from dogfood cycle — previous cycle identified §4.44.5 provenance gap, this cycle targets §6.5 implementation.
 
@@ -5014,3 +5033,141 @@ ear], /color [scheme], /effort [low|medium|high], /fast, /summary, /tag [label],
    **Blocker.** None. Reuses existing `stale_base` module; no new logic needed, just a missing call site.
 
    **Source.** Jobdori dogfood 2026-04-20 against `/tmp/jobdori-129-mcp-cred-order` + `/tmp/stale-branch` in response to 10-min cron cycle. Confirmed: `claw doctor` on branch 5 commits behind main says "Status: ok" but `prompt` dispatch would warn "worktree HEAD does not match expected base commit." Gap is a missing invocation of the already-correct `run_stale_base_preflight()` in the `doctor` action handler. Joins **Boot preflight / doctor contract (#80–#83, #114)** family — doctor is the single machine-readable preflight surface; missing checks degrade operator trust. Also relates to **Silent-state inventory** cluster (#102/#127/#129/#245) because stale-base is a runtime truth ("my branch is behind main") that the preflight surface (doctor) does not expose.
+
+## Pinpoint #135. `claw status --json` missing `active_session` boolean and `session.id` cross-reference — two surfaces that should be unified are inconsistent
+
+**Gap.** `claw status --json` exposes a snapshot of the runtime state but does not include (1) a stable `session.id` field (filed as #134 — the fix from the other side is to emit it in lane events; the consumer side needs it queryable via `status` too) and (2) an `active_session: bool` that tells an orchestrator whether the runtime currently has a live session in flight. An external orchestrator (Clawhip, remote agent) running `claw status --json` after sending a prompt has no machine-readable way to confirm whether the session is alive, idle, or stalled without parsing log output.
+
+**Trace path.**
+- `claw status --json` (dispatcher in `main.rs` `CliAction::Status`) renders a `StatusReport` struct that includes `git_state`, `config`, `model`, `provider` — but no `session_id` or `active_session` fields.
+- `claw status` (text mode) also omits both.
+- The `session.id` fix from #134 introduces a UUID at session init; it should be threaded through to `StatusReport` so the round-trip is complete: emit on startup event → queryable via `status --json` → correlatable in lane events.
+
+**Fix shape (~30 lines).**
+1. Add `session_id: Option<String>` and `active_session: bool` to `StatusReport` struct. Both `null`/`false` when no session is active. When a session is running, `session_id` is the same UUID emitted in the startup lane event (#134).
+2. Thread the session state into the `status` handler via a shared `Arc<Mutex<SessionState>>` or equivalent (same mechanism #134 uses for startup event emission).
+3. Text-mode `claw status` surfaces the value: `Session: active (id: abc123)` or `Session: idle`.
+4. Regression tests: (a) `claw status --json` before any prompt → `active_session: false, session_id: null`. (b) `claw status --json` during a prompt session → `active_session: true, session_id: <uuid>`. (c) UUID matches the `session.id` in the first lane event of the same run.
+
+**Acceptance.** An orchestrator can poll `claw status --json` and determine: is there a live session? What is its correlation ID? Does it match the ID from the last startup event? This closes the round-trip opened by #134.
+
+**Blocker.** Depends on #134 (session.id generation at init). Can be filed and implemented together.
+
+**Source.** Jobdori dogfood 2026-04-21 06:53 KST on main HEAD `2c42f8b` during recurring cron cycle. Direct sibling of #134 — #134 covers the event-emission side, #135 covers the query side. Joins **Session identity completeness** (§4.7) and **status surface completeness** cluster (#80/#83/#114/#122). Natural bundle: **#134 + #135** closes the full session-identity round-trip. Session tally: ROADMAP #135.
+
+## Pinpoint #134. No run/correlation ID at session boundary — every observer must infer session identity from timing or prompt content
+
+   **Gap.** When a `claw` session starts, no stable correlation ID is emitted in the first structured event (or any event). Every observer — lane event consumer, log aggregator, Clawhip router, test harness — has to infer session identity from timing proximity or prompt content. If two sessions start in close succession there is no unambiguous way to attribute subsequent events to the correct session. `claw status --json` returns session metadata but does not expose an opaque stable ID that could be used as a correlation key across the event stream.
+
+   **Fix shape.**
+   - Emit `session.id` (opaque, stable, scoped to this boot) in the first structured event at startup
+   - Include same ID in all subsequent lane events as `session_id` field
+   - Expose via `claw status --json` so callers can retrieve the active session's ID from outside
+   - Add regression: golden-fixture asserting `session.id` is present in startup event and value matches across a multi-event trace
+
+   **Acceptance.** Any observer can correlate all events from a session using `session_id` without parsing prompt content or relying on timestamp proximity. `claw status --json` exposes the current session's ID.
+
+   **Blocker.** None. Requires a UUID/nanoid generated at session init and threaded through the event emitter.
+
+   **Source.** Jobdori dogfood 2026-04-21 01:54 KST on main HEAD `50e3fa3` during recurring cron cycle. Joins **Session identity completeness at creation time** (ROADMAP §4.7) — §4.7 covers identity fields at creation time; #134 covers the stable correlation handle that ties those fields to downstream events. Joins **Event provenance / environment labeling** (§4.6) — provenance requires a stable anchor; without `session.id` the provenance chain is broken at the root. Natural bundle with **#241** (no startup run/correlation id, filed by gaebal-gajae 2026-04-20) — #241 approached from the startup cluster; #134 approaches from the event-stream observer side. Same root fix closes both. Session tally: ROADMAP #134.
+
+## Pinpoint #136. `--compact` flag output is not machine-readable — compact turn emits plain text instead of JSON when `--output-format json` is also passed
+
+**Gap.** `claw --compact <prompt>` runs a prompt turn with compacted output (tool-use suppressed, final assistant text only). But `run_with_output()` routes on `(output_format, compact)` with an explicit early-return match: `CliOutputFormat::Text if compact => run_prompt_compact(input)`. The `CliOutputFormat::Json` branch is never reached when `--compact` is set. Result: passing `--compact --output-format json` silently produces plain-text output — the compact flag wins and the format flag is silently ignored. No warning or error is emitted.
+
+**Trace path.**
+- `rust/crates/rusty-claude-cli/src/main.rs:3872-3879` — `run_with_output()` match:
+  ```
+  CliOutputFormat::Text if compact => self.run_prompt_compact(input),
+  CliOutputFormat::Text => self.run_turn(input),
+  CliOutputFormat::Json => self.run_prompt_json(input),
+  ```
+  The `Json` arm is unreachable when `compact = true` because the first arm matches first regardless of `output_format`.
+- `run_prompt_compact()` at line 3879 calls `println!("{final_text}")` — always plain text, no JSON envelope.
+- `run_prompt_json()` at line 3891 wraps output in a JSON object with `message`, `model`, `iterations`, `usage`, `tool_uses`, `tool_results`, etc.
+
+**Fix shape (~20 lines).**
+1. Add a `CliOutputFormat::Json if compact` arm (or merge compact flag into `run_prompt_json` as a parameter) that produces a JSON object with `message: <final_text>` and a `compact: true` marker. Tool-use fields remain present but empty arrays (consistent with compact semantics — tools ran but are not returned verbatim).
+2. Emit a warning or `error.kind: "flag_conflict"` if conflicting flags are passed in a way that silently wins (or document the precedence explicitly in `--help`).
+3. Regression tests: `claw --compact --output-format json <prompt>` must produce valid JSON with at minimum `{message: "...", compact: true}`.
+
+**Acceptance.** An orchestrator that requests compact output for token efficiency AND machine-readable JSON gets both. Silent flag override is never a correct behavior for a tool targeting machine consumers.
+
+**Blocker.** None. Additive change to existing match arms.
+
+**Source.** Jobdori dogfood 2026-04-21 12:25 KST on main HEAD `8b52e77` during recurring cron cycle. Joins **Output format completeness** cluster (#90/#91/#92/#127/#130) — all surfaces that produce inconsistent or plain-text fallbacks when JSON is requested. Also joins **CLI/REPL parity** (§7.1) — compact is available as both `--compact` flag and `/compact` REPL command; JSON output gap affects only the flag path. Session tally: ROADMAP #136.
+
+## Pinpoint #138. Dogfood cycle report-gate opacity — nudge surface collapses "bundle converged", "follow-up landed", and "pre-existing flake only" into single closure shape
+
+**Gap.** When a dogfood nudge triggers on a branch with landed work, the report surface emits status like "fixed 3 tests, pushed branch, 1 unrelated red remains" — but downstream nudges cannot distinguish:
+1. `bundle converged, merge-ready` (e.g., #134/#135 branch after fixes)
+2. `follow-up landed on main, branch still valid` (e.g., #137 + #136 fixes after #134/#135 was ready)
+3. `only pre-existing flake remains, no new regressions` (e.g., `resume_latest...` test failure on main that also fails on feature branch)
+4. `work still in flight, blocker not yet resolved`
+5. `merged and closed, re-nudge is a dup`
+
+Result: repeat nudges look identical whether the prior work converged or is still broken. Claws re-open what was already resolved, burning cycles on rediscovery.
+
+**Concrete example from this session:**
+- 14:30 nudge triggered on bundle already clear (14:25)
+- Reported finding was "nudge closure-state opacity" but manifested as "should we re-nudge or not?"
+- No explicit surface like "status: done", "last-updated: 2026-04-21T14:25", "next-action: none" that stops re-nudges on unchanged state
+
+**Fix shape (~30-50 lines, surfaces not code).**
+1. Dogfood report should carry an explicit **closure state** field: `converged`, `follow-up-landed`, `pre-existing-flake-only`, `in-flight`, `merged`, `dup`.
+2. Each state has a **last-updated timestamp** (when report was filed) and **next-action** (null if converged, or describe blocker).
+3. Nudge logic checks prior report state: if `converged` + timestamp < 10 min old, skip nudge and post "still converged as of HH:MM, no action".
+4. If state changed (e.g., new commits landed), emit **state transition** explicitly: "bundle done (14:25) → follow-up landed (14:42)".
+5. Store closure state in a **shared metadata surface** (Discord message edit, ROADMAP inline, or compact JSON file) so next cycle can read it.
+
+**Acceptance.**
+- Repeat nudges on converged work are replaced with "no change since last report" (skip).
+- State transitions are explicit: "was X, now Y" instead of ambiguous "X and also Y".
+- Claws can scan closure states and prioritize fresh work over already-handled bundles.
+
+**Blocker.** Design question: **where should closure state live?** Options:
+- Edit the prior Discord message with a closure tag (e.g., 🟢 CONVERGED).
+- Add a `.dogfood-closure.json` file to the worktree branch that tracks state.
+- File a new ROADMAP entry per bundle completion (meta-tracking).
+- Embedded in claw-code CLI output (machine-readable, but creates coupling).
+
+Current state is **design question unresolved**. Implementation is straightforward once closure-state model is settled.
+
+**Source.** Jobdori dogfood 2026-04-21 14:25-14:47 KST — multi-cycle convergence pattern exposed by repeat nudges on #134/#135 bundle. Joins **Dogfood loop observability** (related to earlier §4.7 session-identity, but one level up — session-identity is plumbing, closure-state is the **reporting contract**). Also joins **False-green report gating** (from 14:05 finding) — this is the downstream effect: unclear reports beget re-nudges on stale work.
+
+Session tally: ROADMAP #138.
+
+### Evidence for #138 — feat/134-135-session-identity branch is pushed but no PR was opened (2026-04-21 15:05)
+
+**Concrete gap observed:**
+- Branch `feat/134-135-session-identity` pushed to `origin` at `7235260` (commits `f55612e`, `2b7095e`, `230d97a`, `7235260`)
+- Dogfood loop declared bundle "merge-ready" at 14:25
+- ~40 min elapsed; no PR opened, no merge, branch still unmerged
+- Meanwhile #136 and #137 landed directly on main (`a8beca1`, `21adae9`) without going through the branch
+
+**Direct verification of #135 on main:**
+- `env -i $BIN status --output-format json` on main HEAD `768c1ab` shows `active_session: null, session_id: null`
+- Fields exist in JSON schema (added by schema-only?) but values are None because the producer plumbing (`#134`) is not on main
+- #135 consumer relies on #134 producer; both live on feat/134-135 only
+
+**Impact:**
+- `claw status --output-format json` on main returns JSON without the #135 session identity signals (because they're only on feat/134-135)
+- Orchestrators that shipped using the 13:00 "round-trip proof" report believing #134+#135 was merge-ready will get null fields
+- Evidence for #138: "closure-state" = "pushed branch" ≠ "merged" ≠ "in-PR" — nudge surface collapses all three
+
+**Proposed closure-state transition:**
+1. `pushed` — branch exists on origin but no PR (current state for feat/134-135)
+2. `in-PR` — PR open, review pending
+3. `approved` — PR approved, awaiting merge
+4. `merged` — in main
+5. `deployed` — if applicable
+6. `abandoned` — PR closed without merge
+
+Nudge surface should report explicit state + timestamp: `"feat/134-135 state=pushed (no PR) since 13:00; no closure action taken"` instead of ambiguous "merge-ready."
+
+**Token/permission note:**
+- `code-yeongyu` token has write access to push branches to `ultraworkers/claw-code` but lacks `createPullRequest` permission (GraphQL 404)
+- Issues are disabled on the repo (can't open issue-based tracking)
+- Means closure-state tracking must live inside the repo (ROADMAP) or in an external surface (Discord message edits, `.dogfood-closure.json`)
+
+**Filed:** 2026-04-21 15:05 KST as evidence for #138 by Jobdori dogfood loop.

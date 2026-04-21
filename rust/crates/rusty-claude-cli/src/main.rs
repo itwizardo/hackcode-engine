@@ -4170,6 +4170,7 @@ impl LiveCli {
         compact: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match output_format {
+            CliOutputFormat::Json if compact => self.run_prompt_compact_json(input),
             CliOutputFormat::Text if compact => self.run_prompt_compact(input),
             CliOutputFormat::Text => self.run_turn(input),
             CliOutputFormat::Json => self.run_prompt_json(input),
@@ -4186,6 +4187,32 @@ impl LiveCli {
         self.persist_session()?;
         let final_text = final_assistant_text(&summary);
         println!("{final_text}");
+        Ok(())
+    }
+
+
+    fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let result = runtime.run_turn(input, Some(&mut permission_prompter));
+        hook_abort_monitor.stop();
+        let summary = result?;
+        self.replace_runtime(runtime)?;
+        self.persist_session()?;
+        println!(
+            "{}",
+            json!({
+                "message": final_assistant_text(&summary),
+                "compact": true,
+                "model": self.model,
+                "usage": {
+                    "input_tokens": summary.usage.input_tokens,
+                    "output_tokens": summary.usage.output_tokens,
+                    "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
+                },
+            })
+        );
         Ok(())
     }
 
@@ -9371,7 +9398,7 @@ mod tests {
         let args = vec![
             "--output-format=json".to_string(),
             "--model".to_string(),
-            "claude-opus".to_string(),
+            "opus".to_string(),
             "explain".to_string(),
             "this".to_string(),
         ];
@@ -9379,7 +9406,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
-                model: "claude-opus".to_string(),
+                model: "claude-opus-4-6".to_string(),
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -10149,15 +10176,21 @@ mod tests {
     fn multi_word_prompt_still_uses_shorthand_prompt_mode() {
         let _guard = env_lock();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
-        // Input is ["help", "me", "debug"] so the joined prompt shorthand
-        // must be "help me debug". A previous batch accidentally rewrote
-        // the expected string to "$help overview" (copy-paste slip).
+        // Input is ["--model", "opus", "please", "debug", "this"] so the joined
+        // prompt shorthand must stay a normal multi-word prompt while still
+        // honoring alias validation at parse time.
         assert_eq!(
-            parse_args(&["help".to_string(), "me".to_string(), "debug".to_string()])
-                .expect("prompt shorthand should still work"),
+            parse_args(&[
+                "--model".to_string(),
+                "opus".to_string(),
+                "please".to_string(),
+                "debug".to_string(),
+                "this".to_string(),
+            ])
+            .expect("prompt shorthand should still work"),
             CliAction::Prompt {
-                prompt: "help me debug".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                prompt: "please debug this".to_string(),
+                model: "claude-opus-4-6".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
