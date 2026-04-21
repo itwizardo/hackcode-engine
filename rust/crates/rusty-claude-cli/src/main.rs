@@ -231,9 +231,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => resume_session(&session_path, &commands, output_format),
         CliAction::Status {
             model,
+            model_flag_raw,
             permission_mode,
             output_format,
-        } => print_status_snapshot(&model, permission_mode, output_format)?,
+        } => print_status_snapshot(&model, model_flag_raw.as_deref(), permission_mode, output_format)?,
         CliAction::Sandbox { output_format } => print_sandbox_status_snapshot(output_format)?,
         CliAction::Prompt {
             prompt,
@@ -267,6 +268,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Acp { output_format } => print_acp_status(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
+        // #146: dispatch pure-local introspection. Text mode uses existing
+        // render_config_report/render_diff_report; JSON mode uses the
+        // corresponding _json helpers already exposed for resume sessions.
+        CliAction::Config {
+            section,
+            output_format,
+        } => {
+            match output_format {
+                CliOutputFormat::Text => {
+                    println!("{}", render_config_report(section.as_deref())?);
+                }
+                CliOutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&render_config_json(section.as_deref())?)?
+                    );
+                }
+            }
+        }
+        CliAction::Diff { output_format } => match output_format {
+            CliOutputFormat::Text => {
+                println!("{}", render_diff_report()?);
+            }
+            CliOutputFormat::Json => {
+                let cwd = env::current_dir()?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&render_diff_json_for(&cwd)?)?
+                );
+            }
+        },
         CliAction::Export {
             session_reference,
             output_path,
@@ -345,6 +377,10 @@ enum CliAction {
     },
     Status {
         model: String,
+        // #148: raw `--model` flag input (pre-alias-resolution), if any.
+        // None means no flag was supplied; env/config/default fallback is
+        // resolved inside `print_status_snapshot`.
+        model_flag_raw: Option<String>,
         permission_mode: PermissionMode,
         output_format: CliOutputFormat,
     },
@@ -372,6 +408,15 @@ enum CliAction {
         output_format: CliOutputFormat,
     },
     Init {
+        output_format: CliOutputFormat,
+    },
+    // #146: `claw config` and `claw diff` are pure-local read-only
+    // introspection commands; wire them as standalone CLI subcommands.
+    Config {
+        section: Option<String>,
+        output_format: CliOutputFormat,
+    },
+    Diff {
         output_format: CliOutputFormat,
     },
     Export {
@@ -403,6 +448,15 @@ enum LocalHelpTopic {
     Sandbox,
     Doctor,
     Acp,
+    // #141: extend the local-help pattern to every subcommand so
+    // `claw <subcommand> --help` has one consistent contract.
+    Init,
+    State,
+    Export,
+    Version,
+    SystemPrompt,
+    DumpManifests,
+    BootstrapPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,6 +480,9 @@ impl CliOutputFormat {
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut model = DEFAULT_MODEL.to_string();
+    // #148: when user passes --model/--model=, capture the raw input so we
+    // can attribute source: "flag" later. None means no flag was supplied.
+    let mut model_flag_raw: Option<String> = None;
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode_override = None;
     let mut wants_help = false;
@@ -449,10 +506,6 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     && matches!(
                         rest[0].as_str(),
                         "prompt"
-                            | "version"
-                            | "state"
-                            | "init"
-                            | "export"
                             | "commit"
                             | "pr"
                             | "issue"
@@ -462,8 +515,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 // the arg to the API (e.g. `hackcode prompt --help`) should show
                 // top-level help instead. Subcommands that consume their own
                 // args (agents, mcp, plugins, skills) and local help-topic
-                // subcommands (status, sandbox, doctor) must NOT be intercepted
-                // here — they handle --help in their own dispatch paths.
+                // subcommands (status, sandbox, doctor, init, state, export,
+                // version, system-prompt, dump-manifests, bootstrap-plan) must
+                // NOT be intercepted here — they handle --help in their own
+                // dispatch paths via parse_local_help_action(). See #141.
                 wants_help = true;
                 index += 1;
             }
@@ -486,12 +541,14 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     .ok_or_else(|| "missing value for --model".to_string())?;
                 validate_model_syntax(value)?;
                 model = resolve_model_alias_with_config(value);
+                model_flag_raw = Some(value.clone()); // #148
                 index += 2;
             }
             flag if flag.starts_with("--model=") => {
                 let value = &flag[8..];
                 validate_model_syntax(value)?;
                 model = resolve_model_alias_with_config(value);
+                model_flag_raw = Some(value.to_string()); // #148
                 index += 1;
             }
             "--output-format" => {
@@ -673,7 +730,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         return action;
     }
     if let Some(action) =
-        parse_single_word_command_alias(&rest, &model, permission_mode_override, output_format)
+        parse_single_word_command_alias(&rest, &model, model_flag_raw.as_deref(), permission_mode_override, output_format)
     {
         return action;
     }
@@ -691,6 +748,62 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             args: join_optional_args(&rest[1..]),
             output_format,
         }),
+        // #145: `plugins` was routed through the prompt fallback because no
+        // top-level parser arm produced CliAction::Plugins. That made `claw
+        // plugins` (and `claw plugins --help`, `claw plugins list`, ...)
+        // attempt an Anthropic network call, surfacing the misleading error
+        // `missing Anthropic credentials` even though the command is purely
+        // local introspection. Mirror `agents`/`mcp`/`skills`: action is the
+        // first positional arg, target is the second.
+        "plugins" => {
+            let tail = &rest[1..];
+            let action = tail.first().cloned();
+            let target = tail.get(1).cloned();
+            if tail.len() > 2 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw plugins {}`: {}",
+                    tail[..2].join(" "),
+                    tail[2..].join(" ")
+                ));
+            }
+            Ok(CliAction::Plugins {
+                action,
+                target,
+                output_format,
+            })
+        }
+        // #146: `config` is pure-local read-only introspection (merges
+        // `.claw.json` + `.claw/settings.json` from disk, no network, no
+        // state mutation). Previously callers had to spin up a session with
+        // `claw --resume SESSION.jsonl /config` to see their own config,
+        // which is synthetic friction. Accepts an optional section name
+        // (env|hooks|model|plugins) matching the slash command shape.
+        "config" => {
+            let tail = &rest[1..];
+            let section = tail.first().cloned();
+            if tail.len() > 1 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw config {}`: {}",
+                    tail[0],
+                    tail[1..].join(" ")
+                ));
+            }
+            Ok(CliAction::Config {
+                section,
+                output_format,
+            })
+        }
+        // #146: `diff` is pure-local (shells out to `git diff --cached` +
+        // `git diff`). No session needed to inspect the working tree.
+        "diff" => {
+            if rest.len() > 1 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw diff`: {}",
+                    rest[1..].join(" ")
+                ));
+            }
+            Ok(CliAction::Diff { output_format })
+        }
         "skills" => {
             let args = join_optional_args(&rest[1..]);
             match classify_skills_slash_command(args.as_deref()) {
@@ -744,17 +857,45 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             reasoning_effort,
             allow_broad_cwd,
         ),
-        _other => Ok(CliAction::Prompt {
-            prompt: rest.join(" "),
-            model,
-            output_format,
-            allowed_tools,
-            permission_mode,
-            compact,
-            base_commit,
-            reasoning_effort: reasoning_effort.clone(),
-            allow_broad_cwd,
-        }),
+        other => {
+            if rest.len() == 1 && looks_like_subcommand_typo(other) {
+                if let Some(suggestions) = suggest_similar_subcommand(other) {
+                    let mut message = format!("unknown subcommand: {other}.");
+                    if let Some(line) = render_suggestion_line("Did you mean", &suggestions) {
+                        message.push('\n');
+                        message.push_str(&line);
+                    }
+                    message.push_str(
+                        "\nRun `claw --help` for the full list. If you meant to send a prompt literally, use `claw prompt <text>`.",
+                    );
+                    return Err(message);
+                }
+            }
+            // #147: guard empty/whitespace-only prompts at the fallthrough
+            // path the same way `"prompt"` arm above does. Without this,
+            // `claw ""`, `claw "   "`, and `claw "" ""` silently route to
+            // the Anthropic call and surface a misleading
+            // `missing Anthropic credentials` error (or burn API tokens on
+            // an empty prompt when credentials are present).
+            let joined = rest.join(" ");
+            if joined.trim().is_empty() {
+                return Err(
+                    "empty prompt: provide a subcommand (run `claw --help`) or a non-empty prompt string"
+                        .to_string(),
+                );
+            }
+            Ok(CliAction::Prompt {
+                prompt: joined,
+                model,
+                output_format,
+                allowed_tools,
+                permission_mode,
+                compact,
+                base_commit,
+                reasoning_effort: reasoning_effort.clone(),
+                allow_broad_cwd,
+            })
+        }
     }
 }
 
@@ -768,6 +909,17 @@ fn parse_local_help_action(rest: &[String]) -> Option<Result<CliAction, String>>
         "sandbox" => LocalHelpTopic::Sandbox,
         "doctor" => LocalHelpTopic::Doctor,
         "acp" => LocalHelpTopic::Acp,
+        // #141: add the subcommands that were previously falling back
+        // to global help (init/state/export/version) or erroring out
+        // (system-prompt/dump-manifests) or printing their primary
+        // output instead of help text (bootstrap-plan).
+        "init" => LocalHelpTopic::Init,
+        "state" => LocalHelpTopic::State,
+        "export" => LocalHelpTopic::Export,
+        "version" => LocalHelpTopic::Version,
+        "system-prompt" => LocalHelpTopic::SystemPrompt,
+        "dump-manifests" => LocalHelpTopic::DumpManifests,
+        "bootstrap-plan" => LocalHelpTopic::BootstrapPlan,
         _ => return None,
     };
     Some(Ok(CliAction::HelpTopic(topic)))
@@ -780,6 +932,8 @@ fn is_help_flag(value: &str) -> bool {
 fn parse_single_word_command_alias(
     rest: &[String],
     model: &str,
+    // #148: raw --model flag input for status provenance. None = no flag.
+    model_flag_raw: Option<&str>,
     permission_mode_override: Option<PermissionMode>,
     output_format: CliOutputFormat,
 ) -> Option<Result<CliAction, String>> {
@@ -817,12 +971,18 @@ fn parse_single_word_command_alias(
         "version" => Some(Ok(CliAction::Version { output_format })),
         "status" => Some(Ok(CliAction::Status {
             model: model.to_string(),
+            model_flag_raw: model_flag_raw.map(str::to_string), // #148
             permission_mode: permission_mode_override.unwrap_or_else(default_permission_mode),
             output_format,
         })),
         "sandbox" => Some(Ok(CliAction::Sandbox { output_format })),
         "doctor" => Some(Ok(CliAction::Doctor { output_format })),
         "state" => Some(Ok(CliAction::State { output_format })),
+        // #146: let `config` and `diff` fall through to parse_subcommand
+        // where they are wired as pure-local introspection, instead of
+        // producing the "is a slash command" guidance. Zero-arg cases
+        // reach parse_subcommand too via this None.
+        "config" | "diff" => None,
         other => bare_slash_command_guidance(other).map(Err),
     }
 }
@@ -1029,6 +1189,65 @@ fn suggest_slash_commands(input: &str) -> Vec<String> {
 
 fn suggest_closest_term<'a>(input: &str, candidates: &'a [&'a str]) -> Option<&'a str> {
     ranked_suggestions(input, candidates).into_iter().next()
+}
+
+
+fn suggest_similar_subcommand(input: &str) -> Option<Vec<String>> {
+    const KNOWN_SUBCOMMANDS: &[&str] = &[
+        "help",
+        "version",
+        "status",
+        "sandbox",
+        "doctor",
+        "state",
+        "dump-manifests",
+        "bootstrap-plan",
+        "agents",
+        "mcp",
+        "skills",
+        "system-prompt",
+        "acp",
+        "init",
+        "export",
+        "prompt",
+    ];
+
+    let normalized_input = input.to_ascii_lowercase();
+    let mut ranked = KNOWN_SUBCOMMANDS
+        .iter()
+        .filter_map(|candidate| {
+            let normalized_candidate = candidate.to_ascii_lowercase();
+            let distance = levenshtein_distance(&normalized_input, &normalized_candidate);
+            let prefix_match = common_prefix_len(&normalized_input, &normalized_candidate) >= 4;
+            let substring_match = normalized_candidate.contains(&normalized_input)
+                || normalized_input.contains(&normalized_candidate);
+            ((distance <= 2) || prefix_match || substring_match)
+                .then_some((distance, *candidate))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.cmp(right).then_with(|| left.1.cmp(right.1)));
+    ranked.dedup_by(|left, right| left.1 == right.1);
+    let suggestions = ranked
+        .into_iter()
+        .map(|(_, candidate)| candidate.to_string())
+        .take(3)
+        .collect::<Vec<_>>();
+    (!suggestions.is_empty()).then_some(suggestions)
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(l, r)| l == r)
+        .count()
+}
+
+
+fn looks_like_subcommand_typo(input: &str) -> bool {
+    !input.is_empty()
+        && input
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
 }
 
 fn ranked_suggestions<'a>(input: &str, candidates: &'a [&'a str]) -> Vec<&'a str> {
@@ -1800,6 +2019,9 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
         git_branch,
         git_summary,
         sandbox_status: resolve_sandbox_status(sandbox_config.sandbox(), &cwd),
+        // Doctor path has its own config check; StatusContext here is only
+        // fed into health renderers that don't read config_load_error.
+        config_load_error: config.as_ref().err().map(ToString::to_string),
     };
     Ok(DoctorReport {
         checks: vec![
@@ -1841,14 +2063,21 @@ fn run_worker_state(output_format: CliOutputFormat) -> Result<(), Box<dyn std::e
     let cwd = env::current_dir()?;
     let state_path = cwd.join(".hackcode").join("worker-state.json");
     if !state_path.exists() {
-        // Emit a structured error, then return Err so the process exits 1.
-        // Callers (scripts, CI) need a non-zero exit to detect "no state" without
-        // parsing prose output.
-        // Let the error propagate to main() which will format it correctly
-        // (prose for text mode, JSON envelope for --output-format json).
+        // #139: this error used to say "run a worker first" without telling
+        // callers how to run one. "worker" is an internal concept (there is
+        // no `claw worker` subcommand), so claws/CI had no discoverable path
+        // from the error to a fix. Emit an actionable, structured error that
+        // names the two concrete commands that produce worker state.
+        //
+        // Format in both text and JSON modes is stable so scripts can match:
+        //   error: no worker state file found at <path>
+        //     Hint: worker state is written by the interactive REPL or a non-interactive prompt.
+        //     Run:   claw               # start the REPL (writes state on first turn)
+        //     Or:    claw prompt <text> # run one non-interactive turn
+        //     Then rerun: claw state [--output-format json]
         return Err(format!(
-            "no worker state file found at {} — run a worker first",
-            state_path.display()
+            "no worker state file found at {path}\n  Hint: worker state is written by the interactive REPL or a non-interactive prompt.\n  Run:   claw               # start the REPL (writes state on first turn)\n  Or:    claw prompt <text> # run one non-interactive turn\n  Then rerun: claw state [--output-format json]",
+            path = state_path.display()
         )
         .into());
     }
@@ -2626,6 +2855,13 @@ struct StatusContext {
     git_branch: Option<String>,
     git_summary: GitWorkspaceSummary,
     sandbox_status: runtime::SandboxStatus,
+    /// #143: when `.claw.json` (or another loaded config file) fails to parse,
+    /// we capture the parse error here and still populate every field that
+    /// doesn't depend on runtime config (workspace, git, sandbox defaults,
+    /// discovery counts). Top-level JSON output then reports
+    /// `status: "degraded"` so claws can distinguish "status ran but config
+    /// is broken" from "status ran cleanly".
+    config_load_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3079,6 +3315,7 @@ fn run_resume_command(
                     },
                     default_permission_mode().as_str(),
                     &context,
+                    None, // #148: resumed sessions don't have flag provenance
                 )),
                 json: Some(status_json_value(
                     session.model.as_deref(),
@@ -3091,6 +3328,7 @@ fn run_resume_command(
                     },
                     default_permission_mode().as_str(),
                     &context,
+                    None, // #148: resumed sessions don't have flag provenance
                 )),
             })
         }
@@ -3149,11 +3387,15 @@ fn run_resume_command(
             json: Some(render_memory_json()?),
         }),
         SlashCommand::Init => {
-            let message = init_claude_md()?;
+            // #142: run the init once, then render both text + structured JSON
+            // from the same InitReport so both surfaces stay in sync.
+            let cwd = env::current_dir()?;
+            let report = crate::init::initialize_repo(&cwd)?;
+            let message = report.render();
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
                 message: Some(message.clone()),
-                json: Some(init_json_value(&message)),
+                json: Some(init_json_value(&report, &message)),
             })
         }
         SlashCommand::Diff => {
@@ -4448,6 +4690,7 @@ impl LiveCli {
                 },
                 self.permission_mode.as_str(),
                 &status_context(Some(&self.session.path)).expect("status context should load"),
+                None, // #148: REPL /status doesn't carry flag provenance
             )
         );
     }
@@ -5390,6 +5633,7 @@ fn render_repl_help() -> String {
 
 fn print_status_snapshot(
     model: &str,
+    model_flag_raw: Option<&str>,
     permission_mode: PermissionMode,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5401,18 +5645,30 @@ fn print_status_snapshot(
         estimated_tokens: 0,
     };
     let context = status_context(None)?;
+    // #148: resolve model provenance. If user passed --model, source is
+    // "flag" with the raw input preserved. Otherwise probe env -> config
+    // -> default and record the winning source.
+    let provenance = match model_flag_raw {
+        Some(raw) => ModelProvenance {
+            resolved: model.to_string(),
+            raw: Some(raw.to_string()),
+            source: ModelSource::Flag,
+        },
+        None => ModelProvenance::from_env_or_config_or_default(model),
+    };
     match output_format {
         CliOutputFormat::Text => println!(
             "{}",
-            format_status_report(model, usage, permission_mode.as_str(), &context)
+            format_status_report(&provenance.resolved, usage, permission_mode.as_str(), &context, Some(&provenance))
         ),
         CliOutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&status_json_value(
-                Some(model),
+                Some(&provenance.resolved),
                 usage,
                 permission_mode.as_str(),
                 &context,
+                Some(&provenance),
             ))?
         ),
     }
@@ -5424,10 +5680,28 @@ fn status_json_value(
     usage: StatusUsage,
     permission_mode: &str,
     context: &StatusContext,
+    // #148: optional provenance for `model` field. Surfaces `model_source`
+    // ("flag" | "env" | "config" | "default") and `model_raw` (user input
+    // before alias resolution, or null when source is "default"). Callers
+    // that don't have provenance (legacy resume paths) pass None, in which
+    // case both new fields are omitted.
+    provenance: Option<&ModelProvenance>,
 ) -> serde_json::Value {
+    // #143: top-level `status` marker so claws can distinguish
+    // a clean run from a degraded run (config parse failed but other fields
+    // are still populated). `config_load_error` carries the parse-error string
+    // when present; it's a string rather than a typed object in Phase 1 and
+    // will join the typed-error taxonomy in Phase 2 (ROADMAP §4.44).
+    let degraded = context.config_load_error.is_some();
+    let model_source = provenance.map(|p| p.source.as_str());
+    let model_raw = provenance.and_then(|p| p.raw.clone());
     json!({
         "kind": "status",
+        "status": if degraded { "degraded" } else { "ok" },
+        "config_load_error": context.config_load_error,
         "model": model,
+        "model_source": model_source,
+        "model_raw": model_raw,
         "permission_mode": permission_mode,
         "usage": {
             "messages": usage.message_count,
@@ -5481,22 +5755,43 @@ fn status_context(
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered_config_files = loader.discover().len();
-    let runtime_config = loader.load()?;
+    // #143: degrade gracefully on config parse failure rather than hard-fail.
+    // `claw doctor` already does this; `claw status` now matches that contract
+    // so that one malformed `mcpServers.*` entry doesn't take down the whole
+    // health surface (workspace, git, model, permission, sandbox can still be
+    // reported independently).
+    let (loaded_config_files, sandbox_status, config_load_error) = match loader.load() {
+        Ok(runtime_config) => (
+            runtime_config.loaded_entries().len(),
+            resolve_sandbox_status(runtime_config.sandbox(), &cwd),
+            None,
+        ),
+        Err(err) => (
+            0,
+            // Fall back to defaults for sandbox resolution so claws still see
+            // a populated sandbox section instead of a missing field. Defaults
+            // produce the same output as a runtime config with no sandbox
+            // overrides, which is the right degraded-mode shape: we cannot
+            // report what the user *intended*, only what is actually in effect.
+            resolve_sandbox_status(&runtime::SandboxConfig::default(), &cwd),
+            Some(err.to_string()),
+        ),
+    };
     let project_context = ProjectContext::discover_with_git(&cwd, DEFAULT_DATE)?;
     let (project_root, git_branch) =
         parse_git_status_metadata(project_context.git_status.as_deref());
     let git_summary = parse_git_workspace_summary(project_context.git_status.as_deref());
-    let sandbox_status = resolve_sandbox_status(runtime_config.sandbox(), &cwd);
     Ok(StatusContext {
         cwd,
         session_path: session_path.map(Path::to_path_buf),
-        loaded_config_files: runtime_config.loaded_entries().len(),
+        loaded_config_files,
         discovered_config_files,
         memory_file_count: project_context.instruction_files.len(),
         project_root,
         git_branch,
         git_summary,
         sandbox_status,
+        config_load_error,
     })
 }
 
@@ -5505,11 +5800,41 @@ fn format_status_report(
     usage: StatusUsage,
     permission_mode: &str,
     context: &StatusContext,
+    // #148: optional model provenance to surface in a `Model source` line.
+    // Callers without provenance (legacy resume paths) pass None and the
+    // source line is omitted for backward compat.
+    provenance: Option<&ModelProvenance>,
 ) -> String {
-    [
+    // #143: if config failed to parse, surface a degraded banner at the top
+    // of the text report so humans see the parse error before the body, while
+    // the body below still reports everything that could be resolved without
+    // config (workspace, git, sandbox defaults, etc.).
+    let status_line = if context.config_load_error.is_some() {
+        "Status (degraded)"
+    } else {
+        "Status"
+    };
+    let mut blocks: Vec<String> = Vec::new();
+    if let Some(err) = context.config_load_error.as_deref() {
+        blocks.push(format!(
+            "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial status\n  Details          {err}\n  Hint             `claw doctor` classifies config parse errors; fix the listed field and rerun"
+        ));
+    }
+    // #148: render Model source line after Model, showing where the string
+    // came from (flag / env / config / default) and the raw input if any.
+    let model_source_line = provenance
+        .map(|p| match &p.raw {
+            Some(raw) if raw != model => {
+                format!("\n  Model source     {} (raw: {raw})", p.source.as_str())
+            }
+            Some(_) => format!("\n  Model source     {}", p.source.as_str()),
+            None => format!("\n  Model source     {}", p.source.as_str()),
+        })
+        .unwrap_or_default();
+    blocks.extend([
         format!(
-            "Status
-  Model            {model}
+            "{status_line}
+  Model            {model}{model_source_line}
   Permission mode  {permission_mode}
   Messages         {}
   Turns            {}
@@ -5561,12 +5886,8 @@ fn format_status_report(
             context.memory_file_count,
         ),
         format_sandbox_report(&context.sandbox_status),
-    ]
-    .join(
-        "
-
-",
-    )
+    ]);
+    blocks.join("\n\n")
 }
 
 fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
@@ -5700,6 +6021,58 @@ fn render_help_topic(topic: LocalHelpTopic) -> String {
   Status           discoverability only; `serve` is a status alias and does not launch a daemon yet
   Formats          text (default), json
   Related          ROADMAP #64a (discoverability) · ROADMAP #76 (real ACP support) · claw --help"
+            .to_string(),
+        LocalHelpTopic::Init => "Init
+  Usage            claw init [--output-format <format>]
+  Purpose          create .claw/, .claw.json, .gitignore, and CLAUDE.md in the current project
+  Output           list of created vs. skipped files (idempotent: safe to re-run)
+  Formats          text (default), json
+  Related          claw status · claw doctor"
+            .to_string(),
+        LocalHelpTopic::State => "State
+  Usage            claw state [--output-format <format>]
+  Purpose          read .claw/worker-state.json written by the interactive REPL or a one-shot prompt
+  Output           worker id, model, permissions, session reference (text or json)
+  Formats          text (default), json
+  Produces state   `claw` (interactive REPL) or `claw prompt <text>` (one non-interactive turn)
+  Observes state   `claw state` reads; clawhip/CI may poll this file without HTTP
+  Exit codes       0 if state file exists and parses; 1 with actionable hint otherwise
+  Related          claw status · ROADMAP #139 (this worker-concept contract)"
+            .to_string(),
+        LocalHelpTopic::Export => "Export
+  Usage            claw export [--session <id|latest>] [--output <path>] [--output-format <format>]
+  Purpose          serialize a managed session to JSON for review, transfer, or archival
+  Defaults         --session latest (most recent managed session in .claw/sessions/)
+  Formats          text (default), json
+  Related          /session list · claw --resume latest"
+            .to_string(),
+        LocalHelpTopic::Version => "Version
+  Usage            claw version [--output-format <format>]
+  Aliases          claw --version · claw -V
+  Purpose          print the claw CLI version and build metadata
+  Formats          text (default), json
+  Related          claw doctor (full build/auth/config diagnostic)"
+            .to_string(),
+        LocalHelpTopic::SystemPrompt => "System Prompt
+  Usage            claw system-prompt [--cwd <path>] [--date YYYY-MM-DD] [--output-format <format>]
+  Purpose          render the resolved system prompt that `claw` would send for the given cwd + date
+  Options          --cwd overrides the workspace dir · --date injects a deterministic date stamp
+  Formats          text (default), json
+  Related          claw doctor · claw dump-manifests"
+            .to_string(),
+        LocalHelpTopic::DumpManifests => "Dump Manifests
+  Usage            claw dump-manifests [--manifests-dir <path>] [--output-format <format>]
+  Purpose          emit every skill/agent/tool manifest the resolver would load for the current cwd
+  Options          --manifests-dir scopes discovery to a specific directory
+  Formats          text (default), json
+  Related          claw skills · claw agents · claw doctor"
+            .to_string(),
+        LocalHelpTopic::BootstrapPlan => "Bootstrap Plan
+  Usage            claw bootstrap-plan [--output-format <format>]
+  Purpose          list the ordered startup phases the CLI would execute before dispatch
+  Output           phase names (text) or structured phase list (json) — primary output is the plan itself
+  Formats          text (default), json
+  Related          claw doctor · claw status"
             .to_string(),
     }
 }
@@ -5930,20 +6303,31 @@ fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn run_init(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let message = init_claude_md()?;
+    let cwd = env::current_dir()?;
+    let report = initialize_repo(&cwd)?;
+    let message = report.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
         CliOutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&init_json_value(&message))?
+            serde_json::to_string_pretty(&init_json_value(&report, &message))?
         ),
     }
     Ok(())
 }
 
-fn init_json_value(message: &str) -> serde_json::Value {
+/// #142: emit first-class structured fields alongside the legacy `message`
+/// string so claws can detect per-artifact state without substring matching.
+fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_json::Value {
+    use crate::init::InitStatus;
     json!({
         "kind": "init",
+        "project_path": report.project_root.display().to_string(),
+        "created": report.artifacts_with_status(InitStatus::Created),
+        "updated": report.artifacts_with_status(InitStatus::Updated),
+        "skipped": report.artifacts_with_status(InitStatus::Skipped),
+        "artifacts": report.artifact_json_entries(),
+        "next_step": crate::init::InitReport::NEXT_STEP,
         "message": message,
     })
 }
@@ -8870,7 +9254,7 @@ mod tests {
         parse_git_status_branch, parse_git_status_metadata_for, parse_git_workspace_summary,
         parse_history_count, permission_policy, print_help_to, push_output_block,
         render_config_report, render_diff_report, render_diff_report_for, render_memory_report,
-        render_prompt_history_report, render_repl_help, render_resume_usage,
+        render_help_topic, render_prompt_history_report, render_repl_help, render_resume_usage,
         render_session_markdown, resolve_model_alias, resolve_model_alias_with_config,
         resolve_repl_model, resolve_session_reference, response_to_events,
         resume_supported_slash_commands, run_resume_command, short_tool_id,
@@ -9758,6 +10142,173 @@ mod tests {
                 output_format: CliOutputFormat::Text,
             }
         );
+        // #145: `plugins` must parse as CliAction::Plugins (not fall through
+        // to the prompt path, which would hit the Anthropic API for a purely
+        // local introspection command).
+        assert_eq!(
+            parse_args(&["plugins".to_string()]).expect("plugins should parse"),
+            CliAction::Plugins {
+                action: None,
+                target: None,
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&["plugins".to_string(), "list".to_string()])
+                .expect("plugins list should parse"),
+            CliAction::Plugins {
+                action: Some("list".to_string()),
+                target: None,
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "plugins".to_string(),
+                "enable".to_string(),
+                "example-bundled".to_string(),
+            ])
+            .expect("plugins enable <target> should parse"),
+            CliAction::Plugins {
+                action: Some("enable".to_string()),
+                target: Some("example-bundled".to_string()),
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "plugins".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+            ])
+            .expect("plugins --output-format json should parse"),
+            CliAction::Plugins {
+                action: None,
+                target: None,
+                output_format: CliOutputFormat::Json,
+            }
+        );
+        // #146: `config` and `diff` must parse as standalone CLI actions,
+        // not fall through to the "is a slash command" error. Both are
+        // pure-local read-only introspection.
+        assert_eq!(
+            parse_args(&["config".to_string()]).expect("config should parse"),
+            CliAction::Config {
+                section: None,
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&["config".to_string(), "env".to_string()])
+                .expect("config env should parse"),
+            CliAction::Config {
+                section: Some("env".to_string()),
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "config".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+            ])
+            .expect("config --output-format json should parse"),
+            CliAction::Config {
+                section: None,
+                output_format: CliOutputFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse_args(&["diff".to_string()]).expect("diff should parse"),
+            CliAction::Diff {
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "diff".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+            ])
+            .expect("diff --output-format json should parse"),
+            CliAction::Diff {
+                output_format: CliOutputFormat::Json,
+            }
+        );
+        // #147: empty / whitespace-only positional args must be rejected
+        // with a specific error instead of falling through to the prompt
+        // path (where they surface a misleading "missing Anthropic
+        // credentials" error or burn API tokens on an empty prompt).
+        let empty_err = parse_args(&["".to_string()])
+            .expect_err("empty positional arg should be rejected");
+        assert!(
+            empty_err.starts_with("empty prompt:"),
+            "empty-arg error should be specific, got: {empty_err}"
+        );
+        let whitespace_err = parse_args(&["   ".to_string()])
+            .expect_err("whitespace-only positional arg should be rejected");
+        assert!(
+            whitespace_err.starts_with("empty prompt:"),
+            "whitespace-only error should be specific, got: {whitespace_err}"
+        );
+        let multi_empty_err = parse_args(&["".to_string(), "".to_string()])
+            .expect_err("multiple empty positional args should be rejected");
+        assert!(
+            multi_empty_err.starts_with("empty prompt:"),
+            "multi-empty error should be specific, got: {multi_empty_err}"
+        );
+        // Typo guard from #108 must still take precedence for non-empty
+        // single-word non-prompt-looking inputs.
+        let typo_err = parse_args(&["sttaus".to_string()])
+            .expect_err("typo'd subcommand should be caught by #108 guard");
+        assert!(
+            typo_err.starts_with("unknown subcommand:"),
+            "typo guard should fire for 'sttaus', got: {typo_err}"
+        );
+        // #148: `--model` flag must be captured as model_flag_raw so status
+        // JSON can report provenance (source: flag, raw: <user-input>).
+        match parse_args(&[
+            "--model".to_string(),
+            "sonnet".to_string(),
+            "status".to_string(),
+        ])
+        .expect("--model sonnet status should parse")
+        {
+            CliAction::Status {
+                model,
+                model_flag_raw,
+                ..
+            } => {
+                assert_eq!(model, "claude-sonnet-4-6", "sonnet alias should resolve");
+                assert_eq!(
+                    model_flag_raw.as_deref(),
+                    Some("sonnet"),
+                    "raw flag input should be preserved"
+                );
+            }
+            other => panic!("expected CliAction::Status, got: {other:?}"),
+        }
+        // --model= form should also capture raw.
+        match parse_args(&[
+            "--model=anthropic/claude-opus-4-6".to_string(),
+            "status".to_string(),
+        ])
+        .expect("--model=... status should parse")
+        {
+            CliAction::Status {
+                model,
+                model_flag_raw,
+                ..
+            } => {
+                assert_eq!(model, "anthropic/claude-opus-4-6");
+                assert_eq!(
+                    model_flag_raw.as_deref(),
+                    Some("anthropic/claude-opus-4-6"),
+                    "--model= form should also preserve raw input"
+                );
+            }
+            other => panic!("expected CliAction::Status, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -9839,6 +10390,193 @@ mod tests {
     }
 
     #[test]
+    fn subcommand_help_flag_has_one_contract_across_all_subcommands_141() {
+        // #141: every documented subcommand must resolve `<subcommand> --help`
+        // to a subcommand-specific help topic, never to global help, never to
+        // an "unknown option" error, never to the subcommand's primary output.
+        let cases: &[(&str, LocalHelpTopic)] = &[
+            ("status", LocalHelpTopic::Status),
+            ("sandbox", LocalHelpTopic::Sandbox),
+            ("doctor", LocalHelpTopic::Doctor),
+            ("acp", LocalHelpTopic::Acp),
+            ("init", LocalHelpTopic::Init),
+            ("state", LocalHelpTopic::State),
+            ("export", LocalHelpTopic::Export),
+            ("version", LocalHelpTopic::Version),
+            ("system-prompt", LocalHelpTopic::SystemPrompt),
+            ("dump-manifests", LocalHelpTopic::DumpManifests),
+            ("bootstrap-plan", LocalHelpTopic::BootstrapPlan),
+        ];
+        for (subcommand, expected_topic) in cases {
+            for flag in ["--help", "-h"] {
+                let parsed = parse_args(&[subcommand.to_string(), flag.to_string()])
+                    .unwrap_or_else(|error| {
+                        panic!("`{subcommand} {flag}` should parse as help but errored: {error}")
+                    });
+                assert_eq!(
+                    parsed,
+                    CliAction::HelpTopic(*expected_topic),
+                    "`{subcommand} {flag}` should resolve to HelpTopic({expected_topic:?})"
+                );
+            }
+            // And the rendered help must actually mention the subcommand name
+            // (or its canonical title) so users know they got the right help.
+            let rendered = render_help_topic(*expected_topic);
+            assert!(
+                !rendered.is_empty(),
+                "{subcommand} help text should not be empty"
+            );
+            assert!(
+                rendered.contains("Usage"),
+                "{subcommand} help text should contain a Usage line"
+            );
+        }
+    }
+
+    #[test]
+    fn status_degrades_gracefully_on_malformed_mcp_config_143() {
+        // #143: previously `claw status` hard-failed on any config parse error,
+        // taking down the entire health surface for one malformed MCP entry.
+        // `claw doctor` already degrades gracefully; this test locks `status`
+        // to the same contract.
+        let _guard = env_lock();
+        let root = temp_dir();
+        let cwd = root.join("project-with-malformed-mcp");
+        std::fs::create_dir_all(&cwd).expect("project dir should exist");
+        // One valid server + one malformed entry missing `command`.
+        std::fs::write(
+            cwd.join(".claw.json"),
+            r#"{
+  "mcpServers": {
+    "everything": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"]},
+    "missing-command": {"args": ["arg-only-no-command"]}
+  }
+}
+"#,
+        )
+        .expect("write malformed .claw.json");
+
+        let context = with_current_dir(&cwd, || {
+            super::status_context(None).expect("status_context should not hard-fail on config parse errors (#143)")
+        });
+
+        // Phase 1 contract: config_load_error is populated with the parse error.
+        let err = context
+            .config_load_error
+            .as_ref()
+            .expect("config_load_error should be Some when config parse fails");
+        assert!(
+            err.contains("mcpServers.missing-command"),
+            "config_load_error should name the malformed field path: {err}"
+        );
+        assert!(
+            err.contains("missing string field command"),
+            "config_load_error should carry the underlying parse error: {err}"
+        );
+
+        // Phase 1 contract: workspace/git/sandbox fields are still populated
+        // (independent of config parse). Sandbox falls back to defaults.
+        assert_eq!(context.cwd, cwd.canonicalize().unwrap_or(cwd.clone()));
+        assert_eq!(
+            context.loaded_config_files, 0,
+            "loaded_config_files should be 0 when config parse fails"
+        );
+        assert!(
+            context.discovered_config_files > 0,
+            "discovered_config_files should still count the file that failed to parse"
+        );
+
+        // JSON output contract: top-level `status: "degraded"` + config_load_error field.
+        let usage = super::StatusUsage {
+            message_count: 0,
+            turns: 0,
+            latest: runtime::TokenUsage::default(),
+            cumulative: runtime::TokenUsage::default(),
+            estimated_tokens: 0,
+        };
+        let json = super::status_json_value(Some("test-model"), usage, "workspace-write", &context, None);
+        assert_eq!(
+            json.get("status").and_then(|v| v.as_str()),
+            Some("degraded"),
+            "top-level status marker should be 'degraded' when config parse failed: {json}"
+        );
+        assert!(
+            json.get("config_load_error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("mcpServers.missing-command")),
+            "config_load_error should surface in JSON output: {json}"
+        );
+        // Independent fields still populated.
+        assert_eq!(
+            json.get("model").and_then(|v| v.as_str()),
+            Some("test-model")
+        );
+        assert!(json.get("workspace").is_some(), "workspace field still reported");
+        assert!(json.get("sandbox").is_some(), "sandbox field still reported");
+
+        // Clean path: no config error → status: "ok", config_load_error: null.
+        let clean_cwd = root.join("project-with-clean-config");
+        std::fs::create_dir_all(&clean_cwd).expect("clean project dir");
+        let clean_context = with_current_dir(&clean_cwd, || {
+            super::status_context(None).expect("clean status_context should succeed")
+        });
+        assert!(clean_context.config_load_error.is_none());
+        let clean_json =
+            super::status_json_value(Some("test-model"), usage, "workspace-write", &clean_context, None);
+        assert_eq!(
+            clean_json.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "clean run should report status: 'ok'"
+        );
+    }
+
+    #[test]
+    fn state_error_surfaces_actionable_worker_commands_139() {
+        // #139: the error for missing `.claw/worker-state.json` must name
+        // the concrete commands that produce worker state, otherwise claws
+        // have no discoverable path from the error to a fix.
+        let _guard = env_lock();
+        let root = temp_dir();
+        let cwd = root.join("project-with-no-state");
+        std::fs::create_dir_all(&cwd).expect("project dir should exist");
+
+        let error = with_current_dir(&cwd, || {
+            super::run_worker_state(CliOutputFormat::Text).expect_err("missing state should error")
+        });
+        let message = error.to_string();
+
+        // Keep the original locator so scripts grepping for it still work.
+        assert!(
+            message.contains("no worker state file found at"),
+            "error should keep the canonical prefix: {message}"
+        );
+        // New actionable hints — this is what #139 is fixing.
+        assert!(
+            message.contains("claw prompt"),
+            "error should name `claw prompt <text>` as a producer: {message}"
+        );
+        assert!(
+            message.contains("REPL"),
+            "error should mention the interactive REPL as a producer: {message}"
+        );
+        assert!(
+            message.contains("claw state"),
+            "error should tell the user what to rerun once state exists: {message}"
+        );
+        // And the State --help topic must document the worker relationship
+        // so claws can discover the contract without hitting the error first.
+        let state_help = render_help_topic(LocalHelpTopic::State);
+        assert!(
+            state_help.contains("Produces state"),
+            "state help must document how state is produced: {state_help}"
+        );
+        assert!(
+            state_help.contains("claw prompt"),
+            "state help must name `claw prompt <text>` as a producer: {state_help}"
+        );
+    }
+
+    #[test]
     fn parses_single_word_command_aliases_without_falling_back_to_prompt_mode() {
         let _guard = env_lock();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
@@ -9858,6 +10596,7 @@ mod tests {
             parse_args(&["status".to_string()]).expect("status should parse"),
             CliAction::Status {
                 model: DEFAULT_MODEL.to_string(),
+                model_flag_raw: None, // #148: no --model flag passed
                 permission_mode: PermissionMode::DangerFullAccess,
                 output_format: CliOutputFormat::Text,
             }
@@ -10324,6 +11063,119 @@ mod tests {
         assert!(report.contains("unknown slash command: /statsu"));
         assert!(report.contains("Did you mean"));
         assert!(report.contains("Use /help"));
+    }
+
+
+    #[test]
+    fn typoed_doctor_subcommand_returns_did_you_mean_error() {
+        let error = parse_args(&["doctorr".to_string()]).expect_err("doctorr should error");
+        assert!(error.contains("unknown subcommand: doctorr."));
+        assert!(error.contains("Did you mean"));
+        assert!(error.contains("doctor"));
+    }
+
+    #[test]
+    fn typoed_skills_subcommand_returns_did_you_mean_error() {
+        let error = parse_args(&["skilsl".to_string()]).expect_err("skilsl should error");
+        assert!(error.contains("unknown subcommand: skilsl."));
+        assert!(error.contains("skills"));
+    }
+
+    #[test]
+    fn typoed_status_subcommand_returns_did_you_mean_error() {
+        let error = parse_args(&["statuss".to_string()]).expect_err("statuss should error");
+        assert!(error.contains("unknown subcommand: statuss."));
+        assert!(error.contains("status"));
+    }
+
+    #[test]
+    fn typoed_export_subcommand_returns_did_you_mean_error() {
+        let error = parse_args(&["exporrt".to_string()]).expect_err("exporrt should error");
+        assert!(error.contains("unknown subcommand: exporrt."));
+        assert!(error.contains("Did you mean"));
+        assert!(error.contains("export"));
+    }
+
+    #[test]
+    fn typoed_mcp_subcommand_returns_did_you_mean_error() {
+        let error = parse_args(&["mcpp".to_string()]).expect_err("mcpp should error");
+        assert!(error.contains("unknown subcommand: mcpp."));
+        assert!(error.contains("mcp"));
+    }
+
+    #[test]
+    fn multi_word_prompt_still_bypasses_subcommand_typo_guard() {
+        assert_eq!(
+            parse_args(&[
+                "hello".to_string(),
+                "world".to_string(),
+                "this".to_string(),
+                "is".to_string(),
+                "a".to_string(),
+                "prompt".to_string(),
+            ])
+            .expect("multi-word prompt should still parse"),
+            CliAction::Prompt {
+                prompt: "hello world this is a prompt".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                output_format: CliOutputFormat::Text,
+                allowed_tools: None,
+                permission_mode: crate::default_permission_mode(),
+                compact: false,
+                base_commit: None,
+                reasoning_effort: None,
+                allow_broad_cwd: false,
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_subcommand_allows_literal_typo_word() {
+        assert_eq!(
+            parse_args(&["prompt".to_string(), "doctorr".to_string()])
+                .expect("explicit prompt subcommand should allow literal typo word"),
+            CliAction::Prompt {
+                prompt: "doctorr".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                output_format: CliOutputFormat::Text,
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
+                compact: false,
+                base_commit: None,
+                reasoning_effort: None,
+                allow_broad_cwd: false,
+            }
+        );
+    }
+
+
+    #[test]
+    fn punctuation_bearing_single_token_still_dispatches_to_prompt() {
+        // #140: Guard against test pollution — isolate cwd + env so this test
+        // doesn't pick up a stale .claw/settings.json from other tests that
+        // may have set `permissionMode: acceptEdits` in a shared cwd.
+        let _guard = env_lock();
+        let root = temp_dir();
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).expect("project dir should exist");
+        let result = with_current_dir(&cwd, || {
+            parse_args(&["PARITY_SCENARIO:bash_permission_prompt_approved".to_string()])
+                .expect("scenario token should still dispatch to prompt")
+        });
+        assert_eq!(
+            result,
+            CliAction::Prompt {
+                prompt: "PARITY_SCENARIO:bash_permission_prompt_approved".to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                output_format: CliOutputFormat::Text,
+                allowed_tools: None,
+                permission_mode: PermissionMode::DangerFullAccess,
+                compact: false,
+                base_commit: None,
+                reasoning_effort: None,
+                allow_broad_cwd: false,
+            }
+        );
     }
 
     #[test]
@@ -10812,7 +11664,9 @@ mod tests {
                     conflicted_files: 0,
                 },
                 sandbox_status: runtime::SandboxStatus::default(),
+                config_load_error: None,
             },
+            None, // #148
         );
         assert!(status.contains("Status"));
         assert!(status.contains("Model            claude-sonnet"));
